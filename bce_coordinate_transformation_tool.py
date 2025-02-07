@@ -266,7 +266,7 @@ class TransformationApp:
                     if ext == '.csv':
                         transform_csv_data(input_file, output_file, params)
                     elif ext == '.dxf':
-                        transform_dxf(input_file, output_file, param_file)
+                        transform_dxf(input_file, output_file, params)
                     elif ext in ['.tif', '.tiff']:
                         transform_geotiff(input_file, output_file, params)
                     elif ext in ['.las', '.laz']:

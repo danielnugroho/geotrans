@@ -19,11 +19,8 @@ import csv
 import sys
 import os
 from pathlib import Path
-import laspy
 import ezdxf
 from ezdxf.math import Vec3
-from ezdxf.math import Matrix44
-from ezdxf import transform
 import rasterio
 from rasterio.transform import from_origin, Affine
 from rasterio.warp import reproject, Resampling  # Add these imports at the top
@@ -186,111 +183,6 @@ def transform_coordinates(coords, params):
         # Move back and apply translation
         return transformed + np.array([cx, cy, cz]) + np.array([params['tx'], params['ty'], params['tz']])
 
-def create_transformation_matrix(file_path):
-    
-    """Read transformation parameters from file"""       
-    
-    # Read the parameters from the file
-    with open(file_path, 'r') as file:
-        params = {}
-        for line in file:
-            print(line)
-
-            key, value = line.strip().split('=')
-
-            # Convert numeric values to float
-            if key not in ['mode', 'type']:
-                value = float(value)
-            params[key] = value
-            print(key,value)
-
-    # Determine the mode and type
-    mode = params.get('mode')
-    transform_type = params.get('type')
-
-    if mode == '3D':
-        if transform_type == 'helmert':
-            # Extract Helmert parameters
-            tx, ty, tz = params['tx'], params['ty'], params['tz']
-            scale = 1 + params['scale']
-            omega, phi, kappa = params['omega'], params['phi'], params['kappa']
-
-            # Create rotation matrix from omega, phi, kappa (in radians)
-            # Assuming small angles, so we can approximate the rotation matrix
-            # as a combination of small angle rotations
-            Rx = Matrix44.x_rotate(omega)
-            Ry = Matrix44.y_rotate(phi)
-            Rz = Matrix44.z_rotate(kappa)
-            rotation_matrix = Rx @ Ry @ Rz
-
-            # Create scaling matrix
-            scaling_matrix = Matrix44.scale(scale, scale, scale)
-
-            # Create translation matrix
-            translation_matrix = Matrix44.translate(tx, ty, tz)
-
-            # Combine all transformations: T * R * S
-            transformation_matrix = translation_matrix @ rotation_matrix @ scaling_matrix
-
-        elif transform_type == 'affine':
-            # Extract Affine parameters
-            tx, ty, tz = params['tx'], params['ty'], params['tz']
-            a11, a12, a13 = params['a11'], params['a12'], params['a13']
-            a21, a22, a23 = params['a21'], params['a22'], params['a23']
-            a31, a32, a33 = params['a31'], params['a32'], params['a33']
-
-            # Create the affine transformation matrix
-            transformation_matrix = Matrix44([
-                [a11, a12, a13, tx],
-                [a21, a22, a23, ty],
-                [a31, a32, a33, tz],
-                [0, 0, 0, 1]
-            ])
-
-        else:
-            raise ValueError(f"Unsupported transformation type: {transform_type}")
-
-    elif mode == '2D':
-        if transform_type == 'helmert':
-            # Extract Helmert parameters
-            tx, ty = params['tx'], params['ty']
-            scale = 1 + params['scale']
-            rotation = params['rotation']
-
-            # Create 2D rotation matrix
-            rotation_matrix = Matrix44.z_rotate(rotation)
-
-            # Create 2D scaling matrix
-            scaling_matrix = Matrix44.scale(scale, scale, 1)
-
-            # Create 2D translation matrix
-            translation_matrix = Matrix44.translate(tx, ty, 0)
-
-            # Combine all transformations: T * R * S
-            transformation_matrix = translation_matrix @ rotation_matrix @ scaling_matrix
-
-        elif transform_type == 'affine':
-            # Extract Affine parameters
-            tx, ty = params['tx'], params['ty']
-            a11, a12 = params['a11'], params['a12']
-            a21, a22 = params['a21'], params['a22']
-
-            # Create the 2D affine transformation matrix
-            transformation_matrix = Matrix44([
-                [a11, a12, 0, tx],
-                [a21, a22, 0, ty],
-                [0, 0, 1, 0],
-                [0, 0, 0, 1]
-            ])
-
-        else:
-            raise ValueError(f"Unsupported transformation type: {transform_type}")
-
-    else:
-        raise ValueError(f"Unsupported mode: {mode}")
-
-    return transformation_matrix
-
 
 def transform_pointcloud(input_file, output_file, params):
     """Transform LAZ/LAS point cloud coordinates using PDAL"""
@@ -389,161 +281,234 @@ def cleanup_dxf(doc):
     # Force older version compatibility
     doc.header['$ACADVER'] = 'AC1014'  # R14 version
 
-def transform_dxf_entity(entity, transform_func):
-    """Transform a single DXF entity's coordinates"""
-    if entity.dxftype() == 'POINT':
-        # Transform point coordinates
-        
-        location = entity.dxf.location
-        x, y, z = location
-        
-        coords = np.array([[x, y, z]])
-        new_coords = transform_func(coords)[0]
-
-        x = new_coords[0]
-        y = new_coords[1]
-        z = new_coords[2]
-        
-        location = x, y, z
-        entity.dxf.location = location
-        
-        
-    elif entity.dxftype() == 'LINE':
-        # Transform start and end points
-        start_coords = np.array([[entity.dxf.start.x, entity.dxf.start.y, entity.dxf.start.z]])
-        end_coords = np.array([[entity.dxf.end.x, entity.dxf.end.y, entity.dxf.end.z]])
-        
-        new_start = transform_func(start_coords)[0]
-        new_end = transform_func(end_coords)[0]
-        
-        entity.dxf.start = Vec3(new_start)
-        entity.dxf.end = Vec3(new_end)
-        
-    elif entity.dxftype() == 'LWPOLYLINE':
-        # Transform polyline vertices
-        with entity.points() as points:
-            coords = np.array([[p[0], p[1], 0] for p in points])
-            new_coords = transform_func(coords)
-            # Update points (keeping any bulge values)
-            for i, p in enumerate(points):
-                points[i] = (new_coords[i][0], new_coords[i][1], *p[2:])
-                
-    elif entity.dxftype() == 'POLYLINE':
-        # Transform 3D polyline vertices
-        for vertex in entity.vertices:
-            coords = np.array([[vertex.dxf.location.x, vertex.dxf.location.y, vertex.dxf.location.z]])
-            new_coords = transform_func(coords)[0]
-            vertex.dxf.location = Vec3(new_coords)
+def transform_point(point, transform_func):
+    """
+    Transform a single 3D point using the provided transformation function
+    
+    Args:
+        point: Point coordinates as Vec3 or tuple (x,y,z)
+        transform_func: Function that takes nx3 numpy array and returns transformed coordinates
+    
+    Returns:
+        Vec3: Transformed point coordinates
+    """
+    try:
+        # Convert point to numpy array format
+        if isinstance(point, Vec3):
+            coords = np.array([[point.x, point.y, point.z]])
+        else:
+            coords = np.array([[point[0], point[1], point[2] if len(point) > 2 else 0]])
             
-    elif entity.dxftype() == '3DFACE':
-        # Transform each corner of the 3D face
-        for i in range(4):
-            point_attr = f'vtx{i}'
-            if hasattr(entity.dxf, point_attr):
-                point = getattr(entity.dxf, point_attr)
-                coords = np.array([[point.x, point.y, point.z]])
-                new_coords = transform_func(coords)[0]
-                setattr(entity.dxf, point_attr, Vec3(new_coords))
-                
-    elif entity.dxftype() == 'INSERT':
-        # Transform block reference insertion point
-        coords = np.array([[entity.dxf.insert.x, entity.dxf.insert.y, entity.dxf.insert.z]])
-        new_coords = transform_func(coords)[0]
-        entity.dxf.insert = Vec3(new_coords)
+        # Apply transformation
+        transformed = transform_func(coords)[0]  # Take first point
+        return Vec3(transformed)
         
-    elif entity.dxftype() == 'TEXT':
-        # Transform text insertion point
-        coords = np.array([[entity.dxf.insert.x, entity.dxf.insert.y, 
-                           getattr(entity.dxf, 'z', 0)]])  # Z might not exist
-        new_coords = transform_func(coords)[0]
-        entity.dxf.insert = Vec3(new_coords)
-        
-    elif entity.dxftype() == 'CIRCLE':
-        # Transform circle center
-        coords = np.array([[entity.dxf.center.x, entity.dxf.center.y, entity.dxf.center.z]])
-        new_coords = transform_func(coords)[0]
-        entity.dxf.center = Vec3(new_coords)
-        
-    elif entity.dxftype() == 'ARC':
-        # Transform arc center
-        coords = np.array([[entity.dxf.center.x, entity.dxf.center.y, entity.dxf.center.z]])
-        new_coords = transform_func(coords)[0]
-        entity.dxf.center = Vec3(new_coords)
+    except Exception as e:
+        print(f"Error transforming point {point}: {str(e)}")
+        return point  # Return original point if transformation fails
 
-def transform_dxf_old(input_file, output_file, params):
-    """Transform DXF file coordinates"""
+def transform_polyline_points(points, transform_func):
+    """
+    Transform a list of polyline points
+    
+    Args:
+        points: List of point coordinates (x,y) or (x,y,z)
+        transform_func: Transformation function
+    
+    Returns:
+        list: Transformed points with same structure as input
+    """
+    try:
+        # Convert points to nx3 numpy array
+        coords = []
+        for p in points:
+            if len(p) > 2:
+                coords.append([p[0], p[1], p[2]])
+            else:
+                coords.append([p[0], p[1], 0])
+                
+        coords = np.array(coords)
+        
+        # Apply transformation
+        transformed = transform_func(coords)
+        
+        # Convert back to original format
+        result = []
+        for i, p in enumerate(points):
+            if len(p) > 2:
+                result.append((transformed[i][0], transformed[i][1], transformed[i][2], *p[3:]))
+            else:
+                result.append((transformed[i][0], transformed[i][1], *p[2:]))
+                
+        return result
+        
+    except Exception as e:
+        print(f"Error transforming polyline points: {str(e)}")
+        return points
+
+def transform_dxf_entity(entity, transform_func):
+    """
+    Transform a single DXF entity
+    
+    Args:
+        entity: DXF entity object
+        transform_func: Coordinate transformation function
+    
+    Returns:
+        bool: True if transformation was successful
+    """
+    try:
+        dxftype = entity.dxftype()
+        
+        if dxftype == 'POINT':
+            # Transform point location
+            new_location = transform_point(entity.dxf.location, transform_func)
+            entity.dxf.location = new_location
+            
+        elif dxftype == 'LINE':
+            # Transform start and end points
+            entity.dxf.start = transform_point(entity.dxf.start, transform_func)
+            entity.dxf.end = transform_point(entity.dxf.end, transform_func)
+            
+        elif dxftype == 'CIRCLE':
+            # Transform center point
+            entity.dxf.center = transform_point(entity.dxf.center, transform_func)
+            
+        elif dxftype == 'ARC':
+            # Transform center point (radius and angles remain unchanged)
+            entity.dxf.center = transform_point(entity.dxf.center, transform_func)
+            
+        elif dxftype == 'ELLIPSE':
+            # Transform center and endpoints
+            entity.dxf.center = transform_point(entity.dxf.center, transform_func)
+            entity.dxf.major_axis = transform_point(
+                Vec3(entity.dxf.major_axis), 
+                transform_func
+            ) - transform_point(Vec3((0,0,0)), transform_func)
+            
+        elif dxftype == 'LWPOLYLINE':
+            # Transform lightweight polyline vertices
+            with entity.points() as points:
+                new_points = transform_polyline_points(points, transform_func)
+                points[:] = new_points
+                
+        elif dxftype == 'POLYLINE':
+            # Transform classic polyline vertices
+            for vertex in entity.vertices:
+                vertex.dxf.location = transform_point(vertex.dxf.location, transform_func)
+                
+        elif dxftype == 'SPLINE':
+            # Transform control points and fit points
+            new_control_points = [
+                transform_point(p, transform_func) 
+                for p in entity.control_points
+            ]
+            entity.control_points = new_control_points
+            
+            if entity.fit_points:
+                new_fit_points = [
+                    transform_point(p, transform_func) 
+                    for p in entity.fit_points
+                ]
+                entity.fit_points = new_fit_points
+                
+        elif dxftype == '3DFACE':
+            # Transform each vertex
+            for i in range(4):
+                point_attr = f'vtx{i}'
+                if hasattr(entity.dxf, point_attr):
+                    point = getattr(entity.dxf, point_attr)
+                    new_point = transform_point(point, transform_func)
+                    setattr(entity.dxf, point_attr, new_point)
+                    
+        elif dxftype == 'TEXT':
+            # Transform insertion point and alignment point if present
+            entity.dxf.insert = transform_point(entity.dxf.insert, transform_func)
+            if hasattr(entity.dxf, 'align_point'):
+                entity.dxf.align_point = transform_point(
+                    entity.dxf.align_point, 
+                    transform_func
+                )
+                
+        elif dxftype == 'MTEXT':
+            # Transform insertion point
+            entity.dxf.insert = transform_point(entity.dxf.insert, transform_func)
+            
+        elif dxftype == 'INSERT':
+            # Transform block reference insertion point
+            entity.dxf.insert = transform_point(entity.dxf.insert, transform_func)
+            
+        elif dxftype == 'HATCH':
+            # Transform hatch boundary paths
+            for path in entity.paths:
+                for vertex in path.vertices:
+                    new_point = transform_point((vertex[0], vertex[1], 0), transform_func)
+                    vertex = (new_point.x, new_point.y)
+                    
+        return True
+        
+    except Exception as e:
+        print(f"Error transforming {dxftype} entity: {str(e)}")
+        return False
+
+def transform_dxf(input_file, output_file, params):
+    """
+    Transform DXF file coordinates
+    
+    Args:
+        input_file: Path to input DXF file
+        output_file: Path to output DXF file
+        params: Dictionary of transformation parameters
+    """
     try:
         print("Reading DXF file...")
         doc = ezdxf.readfile(input_file)
         
-        # Create a transformation function that applies our parameters
+        # Create transformation function
         def transform_func(coords):
             return transform_coordinates(coords, params)
         
-        print("Transforming entities...")
-        # Process all model space entities
+        # Transform entities in model space
+        print("Transforming model space entities...")
         msp = doc.modelspace()
         entity_count = 0
+        success_count = 0
         
-        # Transform each entity
         for entity in msp:
-            try:
-                transform_dxf_entity(entity, transform_func)
+            entity_count += 1
+            if transform_dxf_entity(entity, transform_func):
+                success_count += 1
+                
+        # Transform entities in paper space
+        print("Transforming paper space entities...")
+        for layout in doc.layouts:
+            if layout.name == 'Model': continue
+            for entity in layout:
                 entity_count += 1
-            except Exception as e:
-                print(f"Warning: Could not transform entity {entity.dxftype()}: {str(e)}")
-                continue
-        
-        # Process all blocks
+                if transform_dxf_entity(entity, transform_func):
+                    success_count += 1
+                    
+        # Transform block definitions
         print("Transforming blocks...")
         for block in doc.blocks:
-            # Skip model space and paper space blocks
-            if block.name.lower() in ['*model_space', '*paper_space']:
+            # Skip model and paper space blocks
+            if block.name.lower() in ['*model_space', '*paper_space', '*paper_space0']:
                 continue
                 
             for entity in block:
-                try:
-                    transform_dxf_entity(entity, transform_func)
-                    entity_count += 1
-                except Exception as e:
-                    print(f"Warning: Could not transform block entity {entity.dxftype()}: {str(e)}")
-                    continue
-        
+                entity_count += 1
+                if transform_dxf_entity(entity, transform_func):
+                    success_count += 1
+                    
+        # Save transformed file
         print("Saving transformed DXF...")
-        doc.saveas(output_file, fmt="asc")
+        doc.saveas(output_file)
         
-        print(f"Successfully transformed {entity_count} entities")
-            
+        print(f"Successfully transformed {success_count} out of {entity_count} entities")
+        
     except Exception as e:
         print(f"Error transforming DXF file: {str(e)}")
-        raise  # This will show the full error traceback
-        sys.exit(1)
-
-def transform_dxf(input_file, output_file, param_file):
-    # Load the DXF file
-    doc = ezdxf.readfile(input_file)
-    msp = doc.modelspace()
-    
-    try:
-        transform_matrix = create_transformation_matrix(param_file)
-    
-    except Exception as e:
-        print(f"Error transforming DXF file: {str(e)}")
-        raise  # This will show the full error traceback
-        sys.exit(1)
-    
-    # Iterate through entities and apply transformations
-    for entity in msp:
-        print(entity)
-        #entity.transform(transform_matrix)
-        #apply_affine_transform_to_entity2(entity, transform_matrix)
-    
-    log = transform.inplace(msp, transform_matrix)
-    
-    print(log.messages())
-
-    # Save the modified DXF file
-    doc.saveas(output_file, fmt="asc")
+        raise
 
 def compute_corner_coordinates(transform, width, height):
     """Compute corner coordinates (pixel centers) of the raster"""

@@ -1,6 +1,97 @@
 # -*- coding: utf-8 -*-
+
+__version__ = "1.0.0"
+__author__ = "Daniel Adi Nugroho"
+__email__ = "dnugroho@gmail.com"
+__status__ = "Production"
+__date__ = "2025-02-07"
+__copyright__ = "Copyright (c) 2025"
+__license__ = "MIT"  # or appropriate license
+
+# Version History
+# --------------
+# 1.0.0 (2025-02-07)
+# - Initial release
+# - Support for 2D and 3D transformations
+# - Helmert and Affine transformation options
+# - CSV input/output functionality
+# - Error analysis and statistics
+
+
 """
-Combined Helmert and Affine transformation module for 2D and 3D coordinates
+Coordinate Transformation Module
+==============================
+
+This module provides functionality for transforming coordinates between different coordinate systems
+using either Helmert or Affine transformations in both 2D and 3D space.
+
+Purpose:
+--------
+- Transform coordinates from one system to another (e.g., local to global coordinates)
+- Support both 2D and 3D coordinate transformations
+- Provide both Helmert (similarity) and Affine transformation options
+- Calculate and report transformation accuracy statistics
+
+Requirements:
+------------
+- Python 3.6 or higher
+- Required packages: numpy, scipy
+- Input data must be in CSV format
+
+Input CSV Format:
+---------------
+The input CSV files (both source and target) must have the following columns:
+- ID: Point identifier
+- X: X coordinate
+- Y: Y coordinate
+- Z: Z coordinate
+- Type: Point type (optional)
+
+Usage:
+-----
+1. Prepare two CSV files:
+   - Source coordinates CSV (points in original coordinate system)
+   - Target coordinates CSV (same points in desired coordinate system)
+
+2. Run the script:
+   python get_localization_params.py
+
+3. When prompted:
+   - Enter the path to source coordinates CSV
+   - Enter the path to target coordinates CSV
+   - Choose transformation mode (2D or 3D)
+   - Choose transformation type (Helmert or Affine)
+   - Choose whether to save transformation parameters
+
+Transformation Types:
+------------------
+1. Helmert (Similarity) Transformation:
+   - 2D: 4 parameters (2 translations, 1 scale, 1 rotation)
+   - 3D: 7 parameters (3 translations, 1 scale, 3 rotations)
+   - Preserves angles and shape
+   - Minimum points required: 2 for 2D, 3 for 3D
+
+2. Affine Transformation:
+   - 2D: 6 parameters (2 translations, 4 transformation coefficients)
+   - 3D: 12 parameters (3 translations, 9 transformation coefficients)
+   - Allows for different scales in different directions
+   - Minimum points required: 3 for 2D, 4 for 3D
+
+Output:
+-------
+- Transformation parameters
+- Detailed error analysis including RMS errors
+- Sample results showing original, transformed, and target coordinates
+- Option to save parameters to a file
+
+Example Usage:
+------------
+>>> python get_localization_params.py
+Enter path to source coordinates CSV: source_points.csv
+Enter path to target coordinates CSV: target_points.csv
+Choose transformation mode (2D/3D): 3D
+Choose transformation type (helmert/affine): helmert
+
 """
 
 import numpy as np
