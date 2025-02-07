@@ -1,8 +1,95 @@
 # -*- coding: utf-8 -*-
-"""
-Created on Sat Jan 25 14:44:24 2025
 
-@author: dnugr
+__version__ = "1.0.0"
+__author__ = "Daniel Adi Nugroho"
+__email__ = "dnugroho@gmail.com"
+__status__ = "Production"
+__date__ = "2025-02-08"
+__copyright__ = "Copyright (c) 2025"
+__license__ = "MIT"  # or appropriate license
+
+# Version History
+# --------------
+# 1.0.0 (2025-02-08)
+# - Initial release
+# - GUI wrapper for geospatial data transformation functions
+
+"""
+Coordinate Transformation Suite GUI
+=================================
+
+A graphical user interface for coordinate transformation operations, providing tools for both
+parameter computation and file transformation. This application serves as the main interface
+for the coordinate transformation toolkit.
+
+Purpose:
+--------
+- Provide user-friendly interface for coordinate transformation operations
+- Enable parameter computation from source/target coordinate pairs
+- Support file transformation using computed parameters
+- Handle multiple file formats in a unified interface
+- Provide real-time feedback and progress monitoring
+
+Requirements:
+------------
+- Python 3.6 or higher
+- Required packages:
+  - tkinter: for GUI components
+  - numpy: for numerical computations
+  - get_localization_params.py: for parameter computation
+  - transform_data.py: for file transformation operations
+  - pathlib: for path handling
+  - threading: for non-blocking operations
+  - gc: for memory management
+
+Features:
+---------
+1. Parameter Computation Tab:
+   - Source and target CSV file selection
+   - 2D/3D transformation mode selection
+   - Helmert/Affine transformation type selection
+   - Parameter computation and saving functionality
+   - Real-time computation feedback
+
+2. File Transformation Tab:
+   - Support for multiple file formats:
+     * CSV (coordinate data)
+     * LAZ/LAS (point clouds)
+     * DXF (CAD files)
+     * GeoTIFF (raster data)
+   - Input/output file selection
+   - Parameter file loading
+   - Progress monitoring
+
+3. Console Output:
+   - Real-time processing feedback
+   - Error messages and warnings
+   - Operation status updates
+
+Usage:
+------
+1. Launch the application:
+   python bce_coordinate_transformation_tool.py
+
+2. Parameter Computation:
+   - Select source and target CSV files
+   - Choose transformation mode and type
+   - Compute parameters
+   - Save parameters to file
+
+3. File Transformation:
+   - Select input file to transform
+   - Specify output file location
+   - Load transformation parameters
+   - Execute transformation
+
+Notes:
+------
+- All file operations are performed in separate threads to prevent UI freezing
+- Comprehensive error handling and user feedback
+- Automatic cleanup of resources on application close
+- Support for all major coordinate transformation types
+
 """
 
 import tkinter as tk

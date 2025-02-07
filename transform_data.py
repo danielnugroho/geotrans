@@ -1,15 +1,93 @@
 # -*- coding: utf-8 -*-
-"""
-Created on Mon Jan 20 23:28:42 2025
 
-@author: dnugr
-"""
+__version__ = "1.0.0"
+__author__ = "Daniel Adi Nugroho"
+__email__ = "dnugroho@gmail.com"
+__status__ = "Production"
+__date__ = "2025-02-08"
+__copyright__ = "Copyright (c) 2025"
+__license__ = "MIT"  # or appropriate license
 
-# -*- coding: utf-8 -*-
+# Version History
+# --------------
+# 1.0.0 (2025-02-08)
+# - Initial release
+# - Support for 2D and 3D transformations
+# - Helmert and Affine transformation options
+# - Good CSV, LAZ, and DXF functionality
+# - GeoTIFF functionality is still broken
+
 """
-Coordinate transformation script supporting CSV, LAZ/LAS, DXF, and GeoTIFF files
-Usage: python transform_coords.py input_file output_file transform_params.txt
-Input can be .csv, .laz/.las, .dxf, or .tif/.tiff
+Geospatial Data Transformation Module
+==============================
+
+This script provides functionality for transforming spatial data between different coordinate systems
+using either Helmert or Affine transformations in both 2D and 3D space. It supports multiple file 
+formats including CSV, LAZ/LAS point clouds, DXF CAD files, and GeoTIFF raster data.
+
+Purpose:
+--------
+- Transform spatial data between different coordinate systems
+- Support both 2D and 3D coordinate transformations
+- Handle multiple file formats (CSV, LAZ/LAS, DXF, GeoTIFF)
+- Provide both Helmert (similarity) and Affine transformation options
+- Preserve data integrity during transformation
+
+Requirements:
+------------
+- Python 3.6 or higher
+- Required packages: 
+  - numpy: for numerical computations
+  - pdal: for point cloud processing
+  - ezdxf: for CAD file handling
+  - rasterio: for GeoTIFF processing
+  - pathlib: for path handling
+
+Input Formats:
+-------------
+1. CSV files:
+   - Must contain columns: ID, X, Y, Z
+   - Optional column: Type
+
+2. LAZ/LAS files:
+   - Standard LAS/LAZ point cloud format
+   - Maintains all point attributes
+
+3. DXF files:
+   - Supports various entity types (points, lines, polylines, etc.)
+   - Preserves layers and other CAD properties
+
+4. GeoTIFF files:
+   - Maintains georeferencing information
+   - Preserves all bands and metadata
+
+Usage:
+------
+python transform_coords.py input_file output_file transform_params.txt
+
+Parameter File Format:
+--------------------
+Required parameters depend on transformation type:
+1. Helmert (Similarity):
+   - 2D: mode=2D, type=helmert, cx, cy, rotation, scale, tx, ty
+   - 3D: mode=3D, type=helmert, cx, cy, cz, omega, phi, kappa, scale, tx, ty, tz
+
+2. Affine:
+   - 2D: mode=2D, type=affine, cx, cy, a11, a12, a21, a22, tx, ty
+   - 3D: mode=3D, type=affine, cx, cy, cz, a11...a33, tx, ty, tz
+
+Output:
+-------
+- Transformed spatial data in the same format as input
+- Maintains original file structure and properties
+- Preserves metadata and attributes
+
+Notes:
+------
+- Input and output files must be of the same type
+- All transformations are applied relative to specified center point
+- Error handling includes detailed messages for troubleshooting
+- Progress feedback provided during transformation
 """
 
 import numpy as np
