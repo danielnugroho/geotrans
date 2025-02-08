@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
@@ -10,6 +10,12 @@ __license__ = "MIT"  # or appropriate license
 
 # Version History
 # --------------
+
+# 1.0.2 (2025-02-08)
+# - GeoTIFF transform is functional adequately FAST! Thanks to vectorized ops.
+# - GeoTIfF transfrom is spread into chunks to reduce memory footprint
+# - there is still problem in GeoTIFF transform due to NoData values
+# - Further speed optimization through parallel processing is possible
 
 # 1.0.1 (2025-02-08)
 # - GeoTIFF functionality is still fixed, but still slow.
@@ -104,8 +110,7 @@ from pathlib import Path
 import ezdxf
 from ezdxf.math import Vec3
 import rasterio
-from rasterio.transform import from_origin, Affine
-from rasterio.warp import reproject, Resampling  # Add these imports at the top
+from datetime import datetime
 from scipy.ndimage import map_coordinates
 import warnings
 warnings.filterwarnings('ignore', category=rasterio.errors.NotGeoreferencedWarning)
@@ -603,21 +608,6 @@ def compute_corner_coordinates(transform, width, height):
     ]
 
 
-def compute_geotransform(transformed_corners, original_transform):
-    """Compute new geotransform from transformed coordinates"""
-    xs = [x for x, y in transformed_corners]
-    ys = [y for x, y in transformed_corners]
-    
-    return Affine(
-        original_transform.a,  # Pixel width (x-scale)
-        original_transform.b,  # X-shear
-        min(xs),               # Upper-left X
-        original_transform.d,  # Y-shear
-        original_transform.e,  # Pixel height (y-scale, typically negative)
-        max(ys)                # Upper-left Y
-    )
-
-
 def compute_transformed_dimensions(transformed_corners, original_transform):
     """Calculate new raster dimensions based on transformed bounds and original resolution"""
     # Extract coordinates and find bounding box
@@ -652,186 +642,200 @@ def transform_corners(corners, params):
 
 def transform_geotiff(input_file, output_file, params):
     """
-    Transform GeoTIFF coordinates using pixel-by-pixel transformation with Rasterio.
+    Memory-efficient GeoTIFF transformation with BIGTIFF support.
+    Handles both RGB and single-band images while keeping memory usage low.
     
     Args:
         input_file (str): Path to input GeoTIFF file
         output_file (str): Path to output GeoTIFF file
         params (dict): Dictionary containing transformation parameters
-            For 2D transformations:
-                - mode: '2D'
-                - type: 'helmert' or 'affine'
-                - For helmert: cx, cy, rotation, scale, tx, ty
-                - For affine: cx, cy, a11, a12, a21, a22, tx, ty
-            For 3D transformations:
-                - mode: '3D'
-                - type: 'helmert' or 'affine'
-                - For helmert: cx, cy, cz, omega, phi, kappa, scale, tx, ty, tz
-                - For affine: cx, cy, cz, a11...a33, tx, ty, tz
     """
     import rasterio
     import numpy as np
     from rasterio.transform import from_origin
-    from rasterio.warp import calculate_default_transform, reproject, Resampling
+    from rasterio.windows import Window
+    from tqdm import tqdm
+    
+    # Block size for processing (adjust based on available memory)
+    BLOCK_SIZE = 16384
     
     try:
-        # Open the input GeoTIFF
         print("Opening input GeoTIFF...")
         with rasterio.open(input_file) as src:
-            # Get the source metadata
-            src_meta = src.meta
-            src_crs = src.crs
+            # Get metadata and handle NoData value
+            src_meta = src.meta.copy()
             src_transform = src.transform
             
-            # Get the corners of the raster in world coordinates
-            # We use src.height-1 and src.width-1 to get the actual corners
+            # Handle NoData value
+            if src.nodata is None:
+                nodata = 0 if src.count in [3, 4] else 0
+            else:
+                nodata = src.nodata
+            
+            # Calculate transformed dimensions
+            print("Calculating output dimensions...")
             corners = np.array([
-                [0, 0],  # Top-left
-                [src.width-1, 0],  # Top-right
-                [src.width-1, src.height-1],  # Bottom-right
-                [0, src.height-1],  # Bottom-left
+                [0, 0],
+                [src.width-1, 0],
+                [src.width-1, src.height-1],
+                [0, src.height-1],
             ])
             
-            # Convert pixel coordinates to world coordinates
             world_corners = np.array([src.xy(row, col) for row, col in corners])
-            
-            # Add z=0 for transformation
             world_corners_3d = np.column_stack((world_corners, np.zeros(len(world_corners))))
-            
-            # Transform corner coordinates
-            print("Calculating transformed extent...")
             transformed_corners = transform_coordinates(world_corners_3d, params)
             transformed_corners_2d = transformed_corners[:, :2]
             
-            # Calculate new bounds
+            # Calculate new bounds and dimensions
             min_x = transformed_corners_2d[:, 0].min()
             max_x = transformed_corners_2d[:, 0].max()
             min_y = transformed_corners_2d[:, 1].min()
             max_y = transformed_corners_2d[:, 1].max()
             
-            # Keep original pixel resolution
             res_x = abs(src_transform[0])
             res_y = abs(src_transform[4])
             
-            # Calculate new dimensions (FIXED)
-            new_width = int(np.ceil((max_y - min_y) / res_y))   # Will give correct width ≈ 3719
-            new_height = int(np.ceil((max_x - min_x) / res_x))  # Will give correct height ≈ 5240
-            
-            print("DEBUG INFO ----------------------------------------")
-            print(f"min_x, max_x: {min_x}, {max_x}")
-            print(f"min_y, max_y: {min_y}, {max_y}")
-            print(f"res_x, res_y: {res_x}, {res_y}")
-            print(f"Current dims (w,h): {new_width}, {new_height}")
-            print(f"Source dims (w,h): {src.width}, {src.height}")
+            new_width = int(np.ceil((max_y - min_y) / res_y))
+            new_height = int(np.ceil((max_x - min_x) / res_x))
             
             # Create new geotransform
             new_transform = from_origin(min_x, max_y, res_x, res_y)
             
-            # Update metadata for output
+            # Update metadata for output with BIGTIFF and compression settings
             dst_meta = src_meta.copy()
             dst_meta.update({
                 'height': new_height,
                 'width': new_width,
                 'transform': new_transform,
+                'nodata': nodata,
+                # Add BIGTIFF and compression options
+                'BIGTIFF': 'YES',
                 'compress': 'lzw',
-                'nodata': src.nodata  # Properly set nodata value in metadata
+                'tiled': True,
+                'blockxsize': 256,  # Optimal tile size for most systems
+                'blockysize': 256,
+                'predictor': 2,  # Horizontal predictor for better compression
+                'driver': 'GTiff'
             })
             
-           
+            # Prepare inverse transformation parameters
+            inverse_params = params.copy()
+            if params['type'] == 'helmert':
+                if params['mode'] == '2D':
+                    inverse_params.update({
+                        'rotation': -params['rotation'],
+                        'scale': -params['scale'],
+                        'tx': -params['tx'],
+                        'ty': -params['ty']
+                    })
+            else:  # affine
+                if params['mode'] == '2D':
+                    det = params['a11'] * params['a22'] - params['a12'] * params['a21']
+                    inverse_params.update({
+                        'a11': params['a22'] / det,
+                        'a12': -params['a12'] / det,
+                        'a21': -params['a21'] / det,
+                        'a22': params['a11'] / det,
+                        'tx': -(params['tx'] * inverse_params['a11'] + params['ty'] * inverse_params['a12']),
+                        'ty': -(params['tx'] * inverse_params['a21'] + params['ty'] * inverse_params['a22'])
+                    })
+            
             # Create output file
-            print("Creating output GeoTIFF...")
+            print("Creating output GeoTIFF and processing blocks...")
             with rasterio.open(output_file, 'w', **dst_meta) as dst:
+                # Calculate number of blocks needed
+                n_blocks_x = int(np.ceil(new_width / BLOCK_SIZE))
+                n_blocks_y = int(np.ceil(new_height / BLOCK_SIZE))
+                total_blocks = n_blocks_x * n_blocks_y
+                
                 # Process each band
                 for band_idx in range(1, src.count + 1):
-                    print(f"Processing band {band_idx}/{src.count}...")
+                    print(f"\nProcessing band {band_idx}/{src.count}")
                     
-                    # Create coordinate grids for the output raster
-                    rows, cols = np.mgrid[0:new_height, 0:new_width]
-                    output_coords = np.stack((cols.flatten(), rows.flatten()), axis=1)
-                    
-                    # Convert output pixel coordinates to world coordinates
-                    output_world_coords = np.array([new_transform * (x, y) for x, y in output_coords])
-                    
-                    # Add z=0 for transformation
-                    output_world_3d = np.column_stack((output_world_coords, np.zeros(len(output_world_coords))))
-    
-                    
-                    # Apply inverse transformation to get source coordinates
-                    # We need to reverse the transformation parameters
-                    inverse_params = params.copy()
-                    if params['type'] == 'helmert':
-                        if params['mode'] == '2D':
-                            inverse_params['rotation'] = -params['rotation']
-                            inverse_params['scale'] = -params['scale']
-                            inverse_params['tx'] = -params['tx']
-                            inverse_params['ty'] = -params['ty']
-                        else:  # 3D
-                            inverse_params['omega'] = -params['omega']
-                            inverse_params['phi'] = -params['phi']
-                            inverse_params['kappa'] = -params['kappa']
-                            inverse_params['scale'] = -params['scale']
-                            inverse_params['tx'] = -params['tx']
-                            inverse_params['ty'] = -params['ty']
-                            inverse_params['tz'] = -params['tz']
-                    else:  # affine
-                        # For affine, we need to compute the inverse matrix
-                        # This is a simplified version for 2D
-                        if params['mode'] == '2D':
-                            det = params['a11'] * params['a22'] - params['a12'] * params['a21']
-                            inverse_params['a11'] = params['a22'] / det
-                            inverse_params['a12'] = -params['a12'] / det
-                            inverse_params['a21'] = -params['a21'] / det
-                            inverse_params['a22'] = params['a11'] / det
-                            inverse_params['tx'] = -(params['tx'] * inverse_params['a11'] + 
-                                                   params['ty'] * inverse_params['a12'])
-                            inverse_params['ty'] = -(params['tx'] * inverse_params['a21'] + 
-                                                   params['ty'] * inverse_params['a22'])
-                    
-                    source_coords = transform_coordinates(output_world_3d, inverse_params)
-                    
-                    # Convert world coordinates back to pixel coordinates in source raster
-                    source_pixels = np.array([~src_transform * (x, y) for x, y in source_coords[:, :2]])
-                    
-                    # Read source band
-                    source_data = src.read(band_idx)
-                    
-                    # Create valid data mask
-                    valid_mask = source_data != src.nodata
-                    
-                    # Interpolate the mask
-                    mask_interpolated = map_coordinates(valid_mask.astype(np.float64), 
-                                                     [source_pixels[:, 1], source_pixels[:, 0]], 
-                                                     order=1,
-                                                     mode='constant',
-                                                     cval=0)
-                    
-                    # Create threshold mask for output
-                    mask_threshold = mask_interpolated.reshape((new_height, new_width)) >= 0.99
-                    
-                    # Interpolate the actual data
-                    output_values = map_coordinates(source_data, 
-                                                 [source_pixels[:, 1], source_pixels[:, 0]], 
-                                                 order=1,
-                                                 mode='constant',
-                                                 cval=src.nodata if src.nodata else 0)
-                    
-                    # Apply mask to output
-                    output_band = output_values.reshape((new_height, new_width))
-                    output_band[~mask_threshold] = src.nodata
-                    
-                    # Write the transformed band
-                    dst.write(output_band, band_idx)
-
-
-
-                    # Copy band metadata
+                    # Process blocks with progress bar
+                    with tqdm(total=total_blocks, desc="Processing blocks") as pbar:
+                        for block_y in range(n_blocks_y):
+                            for block_x in range(n_blocks_x):
+                                # Calculate block dimensions
+                                block_width = min(BLOCK_SIZE, new_width - block_x * BLOCK_SIZE)
+                                block_height = min(BLOCK_SIZE, new_height - block_y * BLOCK_SIZE)
+                                
+                                # Create coordinate grid for this block
+                                block_rows, block_cols = np.mgrid[
+                                    block_y * BLOCK_SIZE:block_y * BLOCK_SIZE + block_height,
+                                    block_x * BLOCK_SIZE:block_x * BLOCK_SIZE + block_width
+                                ]
+                                
+                                # Flatten coordinates
+                                output_coords = np.stack((block_cols.flatten(), block_rows.flatten()), axis=1)
+                                
+                                # Convert to world coordinates (vectorized)
+                                x = output_coords[:, 0]
+                                y = output_coords[:, 1]
+                                output_world_coords = np.column_stack([
+                                    new_transform.a * x + new_transform.b * y + new_transform.c,
+                                    new_transform.d * x + new_transform.e * y + new_transform.f
+                                ])
+                                
+                                # Add z=0 for transformation
+                                output_world_3d = np.column_stack((output_world_coords, np.zeros(len(output_world_coords))))
+                                
+                                # Apply inverse transformation
+                                source_coords = transform_coordinates(output_world_3d, inverse_params)
+                                
+                                # Convert back to pixel coordinates (vectorized)
+                                x = source_coords[:, 0]
+                                y = source_coords[:, 1]
+                                src_inv = ~src_transform
+                                source_pixels = np.column_stack([
+                                    src_inv.a * x + src_inv.b * y + src_inv.c,
+                                    src_inv.d * x + src_inv.e * y + src_inv.f
+                                ])
+                                
+                                # Create mask for valid pixels
+                                valid_x = (source_pixels[:, 0] >= 0) & (source_pixels[:, 0] < src.width)
+                                valid_y = (source_pixels[:, 1] >= 0) & (source_pixels[:, 1] < src.height)
+                                valid_pixels = valid_x & valid_y
+                                
+                                # Initialize block data
+                                block_data = np.full((block_height, block_width), nodata, dtype=src.dtypes[0])
+                                
+                                if np.any(valid_pixels):
+                                    # Get valid source pixels
+                                    valid_source_pixels = source_pixels[valid_pixels]
+                                    
+                                    # Read source data for valid pixels
+                                    resampled_values = map_coordinates(
+                                        src.read(band_idx),
+                                        [valid_source_pixels[:, 1], valid_source_pixels[:, 0]],
+                                        order=1,
+                                        mode='constant',
+                                        cval=nodata
+                                    )
+                                    
+                                    # Reshape block data
+                                    block_data_flat = block_data.ravel()
+                                    block_data_flat[valid_pixels] = resampled_values
+                                    block_data = block_data_flat.reshape((block_height, block_width))
+                                
+                                # Write block to output
+                                dst.write(
+                                    block_data,
+                                    band_idx,
+                                    window=Window(
+                                        block_x * BLOCK_SIZE,
+                                        block_y * BLOCK_SIZE,
+                                        block_width,
+                                        block_height
+                                    )
+                                )
+                                
+                                pbar.update(1)
+                                
+                    # Copy band description
                     dst.set_band_description(band_idx, src.descriptions[band_idx-1] or '')
-                    
-                    # Copy nodata value if it exists
-                    # In Rasterio, nodata value is set in the metadata when creating the dataset
-                    # So we don't need to set it here as it's already in dst_meta
         
-        print(f"Successfully transformed GeoTIFF: {new_width}x{new_height} pixels")
+        print(f"\nSuccessfully transformed GeoTIFF: {new_width}x{new_height} pixels")
         
     except Exception as e:
         print(f"Error transforming GeoTIFF: {str(e)}")
