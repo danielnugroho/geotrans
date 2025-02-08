@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
@@ -10,6 +10,9 @@ __license__ = "MIT"  # or appropriate license
 
 # Version History
 # --------------
+
+# 1.0.3 (2025-02-08)
+# - fixed the NoData values problem (NoData being interpolated and damage the output)
 
 # 1.0.2 (2025-02-08)
 # - GeoTIFF transform is functional adequately FAST! Thanks to vectorized ops.
@@ -644,6 +647,7 @@ def transform_geotiff(input_file, output_file, params):
     """
     Memory-efficient GeoTIFF transformation with BIGTIFF support.
     Handles both RGB and single-band images while keeping memory usage low.
+    Ensures NoData values are properly handled and don't affect interpolation.
     
     Args:
         input_file (str): Path to input GeoTIFF file
@@ -666,9 +670,9 @@ def transform_geotiff(input_file, output_file, params):
             src_meta = src.meta.copy()
             src_transform = src.transform
             
-            # Handle NoData value
+            # Handle NoData value - use source NoData or set default
             if src.nodata is None:
-                nodata = 0 if src.count in [3, 4] else 0
+                nodata = 0 if src.count in [3, 4] else -32767  # Default NoData value
             else:
                 nodata = src.nodata
             
@@ -701,20 +705,19 @@ def transform_geotiff(input_file, output_file, params):
             # Create new geotransform
             new_transform = from_origin(min_x, max_y, res_x, res_y)
             
-            # Update metadata for output with BIGTIFF and compression settings
+            # Update metadata for output
             dst_meta = src_meta.copy()
             dst_meta.update({
                 'height': new_height,
                 'width': new_width,
                 'transform': new_transform,
-                'nodata': nodata,
-                # Add BIGTIFF and compression options
+                'nodata': nodata,  # Explicitly set NoData value
                 'BIGTIFF': 'YES',
                 'compress': 'lzw',
                 'tiled': True,
-                'blockxsize': 256,  # Optimal tile size for most systems
+                'blockxsize': 256,
                 'blockysize': 256,
-                'predictor': 2,  # Horizontal predictor for better compression
+                'predictor': 2,
                 'driver': 'GTiff'
             })
             
@@ -797,21 +800,34 @@ def transform_geotiff(input_file, output_file, params):
                                 valid_y = (source_pixels[:, 1] >= 0) & (source_pixels[:, 1] < src.height)
                                 valid_pixels = valid_x & valid_y
                                 
-                                # Initialize block data
+                                # Initialize block data with NoData value
                                 block_data = np.full((block_height, block_width), nodata, dtype=src.dtypes[0])
                                 
                                 if np.any(valid_pixels):
+                                    # Read source data for the current band
+                                    source_data = src.read(band_idx)
+                                    
+                                    # Create a mask for NoData values in source data
+                                    source_nodata_mask = source_data == nodata
+                                    
+                                    # Convert source NoData to NaN for interpolation
+                                    source_data_float = source_data.astype(np.float64)
+                                    source_data_float[source_nodata_mask] = np.nan
+                                    
                                     # Get valid source pixels
                                     valid_source_pixels = source_pixels[valid_pixels]
                                     
-                                    # Read source data for valid pixels
+                                    # Perform interpolation with NaN handling
                                     resampled_values = map_coordinates(
-                                        src.read(band_idx),
+                                        source_data_float,
                                         [valid_source_pixels[:, 1], valid_source_pixels[:, 0]],
                                         order=1,
                                         mode='constant',
-                                        cval=nodata
+                                        cval=np.nan
                                     )
+                                    
+                                    # Convert NaN back to NoData value
+                                    resampled_values = np.nan_to_num(resampled_values, nan=nodata)
                                     
                                     # Reshape block data
                                     block_data_flat = block_data.ravel()
