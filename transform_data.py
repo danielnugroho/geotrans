@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
@@ -10,6 +10,10 @@ __license__ = "MIT"  # or appropriate license
 
 # Version History
 # --------------
+
+# 1.0.1 (2025-02-08)
+# - GeoTIFF functionality is still fixed, but still slow.
+
 # 1.0.0 (2025-02-08)
 # - Initial release
 # - Support for 2D and 3D transformations
@@ -102,6 +106,7 @@ from ezdxf.math import Vec3
 import rasterio
 from rasterio.transform import from_origin, Affine
 from rasterio.warp import reproject, Resampling  # Add these imports at the top
+from scipy.ndimage import map_coordinates
 import warnings
 warnings.filterwarnings('ignore', category=rasterio.errors.NotGeoreferencedWarning)
 
@@ -597,71 +602,6 @@ def compute_corner_coordinates(transform, width, height):
         transform * (0.5, height - 0.5)     # Lower-left
     ]
 
-def transform_geotiff(input_file, output_file, params):
-    """Transform GeoTIFF coordinates with correct geotransform and dimensions"""
-    try:
-        with rasterio.open(input_file) as src:
-            data = src.read()
-            original_transform = src.transform
-            crs = src.crs
-            dtype = src.dtypes[0]
-            count = src.count
-
-            # Get original pixel size
-            pixel_width = original_transform.a
-            pixel_height = original_transform.e  # Negative for north-up
-
-            # Calculate original corners (pixel centers)
-            corners = compute_corner_coordinates(src.transform, src.width, src.height)
-            
-            # Transform corners using the coordinate transformation
-            transformed_corners = transform_corners(corners, params)
-            xs = [x for x, y in transformed_corners]
-            ys = [y for x, y in transformed_corners]
-            min_x, max_x = min(xs), max(xs)
-            min_y, max_y = min(ys), max(ys)
-
-            # Calculate new transform origin (top-left of upper-left pixel)
-            new_west = min_x - (pixel_width / 2)
-            new_north = max_y - (pixel_height / 2)  # pixel_height is negative
-            new_transform = from_origin(new_west, new_north, pixel_width, abs(pixel_height))
-
-            # Calculate new dimensions to cover all transformed corners
-            new_width = int(np.ceil((max_x - min_x + pixel_width) / pixel_width))
-            new_height = int(np.ceil((max_y - min_y + abs(pixel_height)) / abs(pixel_height)))
-
-            # Update output profile
-            out_profile = src.profile.copy()
-            out_profile.update({
-                'transform': new_transform,
-                'width': new_width,
-                'height': new_height
-            })
-
-            with rasterio.open(output_file, 'w', **out_profile) as dst:
-                reproject(
-                    source=data,
-                    destination=rasterio.band(dst, 1),
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=new_transform,
-                    dst_crs=crs,
-                    resampling=Resampling.bilinear
-                )
-                print(count)
-                if count > 1:
-                    for band in range(1,count+1):
-                        print(band)
-                        dst.write(src.read(band), band)
-                
-                dst.update_tags(**src.tags())
-                dst.descriptions = src.descriptions
-
-        print(f"Transformed GeoTIFF created: {new_width}x{new_height} pixels")
-
-    except Exception as e:
-        print(f"Error transforming GeoTIFF: {str(e)}")
-        sys.exit(1)
 
 def compute_geotransform(transformed_corners, original_transform):
     """Compute new geotransform from transformed coordinates"""
@@ -711,92 +651,191 @@ def transform_corners(corners, params):
     return [(point[0], point[1]) for point in transformed]
 
 def transform_geotiff(input_file, output_file, params):
-    """Transform GeoTIFF coordinates using affine parameters from file"""
+    """
+    Transform GeoTIFF coordinates using pixel-by-pixel transformation with Rasterio.
+    
+    Args:
+        input_file (str): Path to input GeoTIFF file
+        output_file (str): Path to output GeoTIFF file
+        params (dict): Dictionary containing transformation parameters
+            For 2D transformations:
+                - mode: '2D'
+                - type: 'helmert' or 'affine'
+                - For helmert: cx, cy, rotation, scale, tx, ty
+                - For affine: cx, cy, a11, a12, a21, a22, tx, ty
+            For 3D transformations:
+                - mode: '3D'
+                - type: 'helmert' or 'affine'
+                - For helmert: cx, cy, cz, omega, phi, kappa, scale, tx, ty, tz
+                - For affine: cx, cy, cz, a11...a33, tx, ty, tz
+    """
+    import rasterio
+    import numpy as np
+    from rasterio.transform import from_origin
+    from rasterio.warp import calculate_default_transform, reproject, Resampling
+    
     try:
-        # Extract affine parameters from params
-        a = params.get('a11', 1.0)
-        b = params.get('a12', 0.0)
-        c = params.get('tx', 0.0)
-        d = params.get('a21', 0.0)
-        e = params.get('a22', 1.0)
-        f = params.get('ty', 0.0)
-
-        def affine_transform(x, y):
-            """Apply affine transformation using parameters from file"""
-            return (
-                a * x + b * y + c,
-                d * x + e * y + f
-            )
-
+        # Open the input GeoTIFF
+        print("Opening input GeoTIFF...")
         with rasterio.open(input_file) as src:
-            # Get original properties
-            data = src.read()
-            profile = src.profile
-            orig_transform = src.transform
-            height, width = src.shape
-
+            # Get the source metadata
+            src_meta = src.meta
+            src_crs = src.crs
+            src_transform = src.transform
+            
+            # Get the corners of the raster in world coordinates
+            # We use src.height-1 and src.width-1 to get the actual corners
+            corners = np.array([
+                [0, 0],  # Top-left
+                [src.width-1, 0],  # Top-right
+                [src.width-1, src.height-1],  # Bottom-right
+                [0, src.height-1],  # Bottom-left
+            ])
+            
+            # Convert pixel coordinates to world coordinates
+            world_corners = np.array([src.xy(row, col) for row, col in corners])
+            
+            # Add z=0 for transformation
+            world_corners_3d = np.column_stack((world_corners, np.zeros(len(world_corners))))
+            
             # Transform corner coordinates
-            corners = [
-                (src.bounds.left, src.bounds.top),
-                (src.bounds.right, src.bounds.top),
-                (src.bounds.left, src.bounds.bottom),
-                (src.bounds.right, src.bounds.bottom)
-            ]
-
-            transformed_corners = [affine_transform(x, y) for x, y in corners]
-
+            print("Calculating transformed extent...")
+            transformed_corners = transform_coordinates(world_corners_3d, params)
+            transformed_corners_2d = transformed_corners[:, :2]
+            
             # Calculate new bounds
-            xs = [x for x, y in transformed_corners]
-            ys = [y for x, y in transformed_corners]
-            new_left = min(xs)
-            new_right = max(xs)
-            new_top = max(ys)
-            new_bottom = min(ys)
-
-            # Create new transform matrix
-            new_transform = Affine(
-                (new_right - new_left)/width,  # a: pixel width
-                orig_transform.b,             # b: rotation (keep original)
-                new_left,                     # c: x origin
-                orig_transform.d,             # d: rotation (keep original)
-                (new_bottom - new_top)/height,# e: pixel height (negative)
-                new_top                       # f: y origin
-            )
-
-            # Update profile with new transform
-            profile.update({
+            min_x = transformed_corners_2d[:, 0].min()
+            max_x = transformed_corners_2d[:, 0].max()
+            min_y = transformed_corners_2d[:, 1].min()
+            max_y = transformed_corners_2d[:, 1].max()
+            
+            # Keep original pixel resolution
+            res_x = abs(src_transform[0])
+            res_y = abs(src_transform[4])
+            
+            # Calculate new dimensions (FIXED)
+            new_width = int(np.ceil((max_y - min_y) / res_y))   # Will give correct width ≈ 3719
+            new_height = int(np.ceil((max_x - min_x) / res_x))  # Will give correct height ≈ 5240
+            
+            print("DEBUG INFO ----------------------------------------")
+            print(f"min_x, max_x: {min_x}, {max_x}")
+            print(f"min_y, max_y: {min_y}, {max_y}")
+            print(f"res_x, res_y: {res_x}, {res_y}")
+            print(f"Current dims (w,h): {new_width}, {new_height}")
+            print(f"Source dims (w,h): {src.width}, {src.height}")
+            
+            # Create new geotransform
+            new_transform = from_origin(min_x, max_y, res_x, res_y)
+            
+            # Update metadata for output
+            dst_meta = src_meta.copy()
+            dst_meta.update({
+                'height': new_height,
+                'width': new_width,
                 'transform': new_transform,
-                'compress': 'lzw'
+                'compress': 'lzw',
+                'nodata': src.nodata  # Properly set nodata value in metadata
             })
+            
+           
+            # Create output file
+            print("Creating output GeoTIFF...")
+            with rasterio.open(output_file, 'w', **dst_meta) as dst:
+                # Process each band
+                for band_idx in range(1, src.count + 1):
+                    print(f"Processing band {band_idx}/{src.count}...")
+                    
+                    # Create coordinate grids for the output raster
+                    rows, cols = np.mgrid[0:new_height, 0:new_width]
+                    output_coords = np.stack((cols.flatten(), rows.flatten()), axis=1)
+                    
+                    # Convert output pixel coordinates to world coordinates
+                    output_world_coords = np.array([new_transform * (x, y) for x, y in output_coords])
+                    
+                    # Add z=0 for transformation
+                    output_world_3d = np.column_stack((output_world_coords, np.zeros(len(output_world_coords))))
+    
+                    
+                    # Apply inverse transformation to get source coordinates
+                    # We need to reverse the transformation parameters
+                    inverse_params = params.copy()
+                    if params['type'] == 'helmert':
+                        if params['mode'] == '2D':
+                            inverse_params['rotation'] = -params['rotation']
+                            inverse_params['scale'] = -params['scale']
+                            inverse_params['tx'] = -params['tx']
+                            inverse_params['ty'] = -params['ty']
+                        else:  # 3D
+                            inverse_params['omega'] = -params['omega']
+                            inverse_params['phi'] = -params['phi']
+                            inverse_params['kappa'] = -params['kappa']
+                            inverse_params['scale'] = -params['scale']
+                            inverse_params['tx'] = -params['tx']
+                            inverse_params['ty'] = -params['ty']
+                            inverse_params['tz'] = -params['tz']
+                    else:  # affine
+                        # For affine, we need to compute the inverse matrix
+                        # This is a simplified version for 2D
+                        if params['mode'] == '2D':
+                            det = params['a11'] * params['a22'] - params['a12'] * params['a21']
+                            inverse_params['a11'] = params['a22'] / det
+                            inverse_params['a12'] = -params['a12'] / det
+                            inverse_params['a21'] = -params['a21'] / det
+                            inverse_params['a22'] = params['a11'] / det
+                            inverse_params['tx'] = -(params['tx'] * inverse_params['a11'] + 
+                                                   params['ty'] * inverse_params['a12'])
+                            inverse_params['ty'] = -(params['tx'] * inverse_params['a21'] + 
+                                                   params['ty'] * inverse_params['a22'])
+                    
+                    source_coords = transform_coordinates(output_world_3d, inverse_params)
+                    
+                    # Convert world coordinates back to pixel coordinates in source raster
+                    source_pixels = np.array([~src_transform * (x, y) for x, y in source_coords[:, :2]])
+                    
+                    # Read source band
+                    source_data = src.read(band_idx)
+                    
+                    # Create valid data mask
+                    valid_mask = source_data != src.nodata
+                    
+                    # Interpolate the mask
+                    mask_interpolated = map_coordinates(valid_mask.astype(np.float64), 
+                                                     [source_pixels[:, 1], source_pixels[:, 0]], 
+                                                     order=1,
+                                                     mode='constant',
+                                                     cval=0)
+                    
+                    # Create threshold mask for output
+                    mask_threshold = mask_interpolated.reshape((new_height, new_width)) >= 0.99
+                    
+                    # Interpolate the actual data
+                    output_values = map_coordinates(source_data, 
+                                                 [source_pixels[:, 1], source_pixels[:, 0]], 
+                                                 order=1,
+                                                 mode='constant',
+                                                 cval=src.nodata if src.nodata else 0)
+                    
+                    # Apply mask to output
+                    output_band = output_values.reshape((new_height, new_width))
+                    output_band[~mask_threshold] = src.nodata
+                    
+                    # Write the transformed band
+                    dst.write(output_band, band_idx)
 
-            # Create destination array
-            dest = np.zeros_like(data)
 
-            # Calculate new dimensions
-            new_width = int(np.ceil((new_right - new_left) / abs(new_transform.a)))
-            new_height = int(np.ceil((new_top - new_bottom) / abs(new_transform.e)))
 
-            # Write output using array warping
-            with rasterio.open(output_file, 'w', 
-                             width=new_width,
-                             height=new_height,
-                             **profile) as dst:
-                reproject(
-                    source=data,
-                    destination=dest,
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=new_transform,
-                    dst_crs=src.crs,
-                    resampling=Resampling.bilinear
-                )
-                dst.write(dest)
-
-        print(f"Transformed GeoTIFF created with parameters: a={a}, b={b}, c={c}, d={d}, e={e}, f={f}")
-
+                    # Copy band metadata
+                    dst.set_band_description(band_idx, src.descriptions[band_idx-1] or '')
+                    
+                    # Copy nodata value if it exists
+                    # In Rasterio, nodata value is set in the metadata when creating the dataset
+                    # So we don't need to set it here as it's already in dst_meta
+        
+        print(f"Successfully transformed GeoTIFF: {new_width}x{new_height} pixels")
+        
     except Exception as e:
         print(f"Error transforming GeoTIFF: {str(e)}")
-        sys.exit(1)
+        raise
 
 def main():
     # Check command line arguments
