@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
-__date__ = "2025-02-08"
+__date__ = "2025-02-10"
 __copyright__ = "Copyright (c) 2025"
 __license__ = "MIT"  # or appropriate license
 
 # Version History
 # --------------
+
+# 1.0.4 (2025-02-10)
+# - added timing commentary on TIF transform to analyze optimization
 
 # 1.0.3 (2025-02-08)
 # - fixed the NoData values problem (NoData being interpolated and damage the output)
@@ -645,9 +648,8 @@ def transform_corners(corners, params):
 
 def transform_geotiff(input_file, output_file, params):
     """
-    Memory-efficient GeoTIFF transformation with BIGTIFF support.
-    Handles both RGB and single-band images while keeping memory usage low.
-    Ensures NoData values are properly handled and don't affect interpolation.
+    Memory-efficient GeoTIFF transformation with timing analysis for each major section.
+    Prints detailed timing information to help identify bottlenecks and parallelization opportunities.
     
     Args:
         input_file (str): Path to input GeoTIFF file
@@ -659,25 +661,47 @@ def transform_geotiff(input_file, output_file, params):
     from rasterio.transform import from_origin
     from rasterio.windows import Window
     from tqdm import tqdm
-    
+    import time
+    from datetime import datetime
+
     # Block size for processing (adjust based on available memory)
     BLOCK_SIZE = 16384
     
+    # Dictionary to store timing information
+    timing_stats = {
+        'initialization': 0,
+        'dimension_calculation': 0,
+        'block_processing': {},  # Will store per-band timing
+        'block_processing_details': {},  # Will store detailed timing for first block of each band
+        'total_time': 0
+    }
+    
+    total_start_time = time.time()
+    
     try:
-        print("Opening input GeoTIFF...")
+        # SECTION 1: Initialization and File Opening
+        section_start = time.time()
+        print("\n=== Starting GeoTIFF Transformation ===")
+        print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
         with rasterio.open(input_file) as src:
-            # Get metadata and handle NoData value
             src_meta = src.meta.copy()
             src_transform = src.transform
             
-            # Handle NoData value - use source NoData or set default
             if src.nodata is None:
-                nodata = 0 if src.count in [3, 4] else -32767  # Default NoData value
+                nodata = 0 if src.count in [3, 4] else -32767
             else:
                 nodata = src.nodata
-            
-            # Calculate transformed dimensions
-            print("Calculating output dimensions...")
+                
+        initialization_time = time.time() - section_start
+        timing_stats['initialization'] = initialization_time
+        print(f"\n[Timing] Initialization: {initialization_time:.2f} seconds")
+        print(f"- File opened and metadata read")
+        
+        # SECTION 2: Calculate Output Dimensions
+        section_start = time.time()
+        
+        with rasterio.open(input_file) as src:
             corners = np.array([
                 [0, 0],
                 [src.width-1, 0],
@@ -711,7 +735,7 @@ def transform_geotiff(input_file, output_file, params):
                 'height': new_height,
                 'width': new_width,
                 'transform': new_transform,
-                'nodata': nodata,  # Explicitly set NoData value
+                'nodata': nodata,
                 'BIGTIFF': 'YES',
                 'compress': 'lzw',
                 'tiled': True,
@@ -720,138 +744,195 @@ def transform_geotiff(input_file, output_file, params):
                 'predictor': 2,
                 'driver': 'GTiff'
             })
+        
+        dimension_calc_time = time.time() - section_start
+        timing_stats['dimension_calculation'] = dimension_calc_time
+        print(f"\n[Timing] Dimension Calculation: {dimension_calc_time:.2f} seconds")
+        print(f"- Input dimensions: {src.width}x{src.height}")
+        print(f"- Output dimensions: {new_width}x{new_height}")
+        
+        # SECTION 3: Prepare Inverse Transform
+        section_start = time.time()
+        inverse_params = params.copy()
+        if params['type'] == 'helmert':
+            if params['mode'] == '2D':
+                inverse_params.update({
+                    'rotation': -params['rotation'],
+                    'scale': -params['scale'],
+                    'tx': -params['tx'],
+                    'ty': -params['ty']
+                })
+        else:  # affine
+            if params['mode'] == '2D':
+                det = params['a11'] * params['a22'] - params['a12'] * params['a21']
+                inverse_params.update({
+                    'a11': params['a22'] / det,
+                    'a12': -params['a12'] / det,
+                    'a21': -params['a21'] / det,
+                    'a22': params['a11'] / det,
+                    'tx': -(params['tx'] * inverse_params['a11'] + params['ty'] * inverse_params['a12']),
+                    'ty': -(params['tx'] * inverse_params['a21'] + params['ty'] * inverse_params['a22'])
+                })
+        
+        inverse_transform_time = time.time() - section_start
+        print(f"\n[Timing] Inverse Transform Preparation: {inverse_transform_time:.2f} seconds")
+        
+        # SECTION 4: Process Blocks
+        print("\n=== Starting Block Processing ===")
+        with rasterio.open(input_file) as src, rasterio.open(output_file, 'w', **dst_meta) as dst:
+            n_blocks_x = int(np.ceil(new_width / BLOCK_SIZE))
+            n_blocks_y = int(np.ceil(new_height / BLOCK_SIZE))
+            total_blocks = n_blocks_x * n_blocks_y
             
-            # Prepare inverse transformation parameters
-            inverse_params = params.copy()
-            if params['type'] == 'helmert':
-                if params['mode'] == '2D':
-                    inverse_params.update({
-                        'rotation': -params['rotation'],
-                        'scale': -params['scale'],
-                        'tx': -params['tx'],
-                        'ty': -params['ty']
-                    })
-            else:  # affine
-                if params['mode'] == '2D':
-                    det = params['a11'] * params['a22'] - params['a12'] * params['a21']
-                    inverse_params.update({
-                        'a11': params['a22'] / det,
-                        'a12': -params['a12'] / det,
-                        'a21': -params['a21'] / det,
-                        'a22': params['a11'] / det,
-                        'tx': -(params['tx'] * inverse_params['a11'] + params['ty'] * inverse_params['a12']),
-                        'ty': -(params['tx'] * inverse_params['a21'] + params['ty'] * inverse_params['a22'])
-                    })
+            print(f"Total blocks to process: {total_blocks} ({n_blocks_x}x{n_blocks_y})")
+            print(f"Block size: {BLOCK_SIZE}x{BLOCK_SIZE} pixels")
             
-            # Create output file
-            print("Creating output GeoTIFF and processing blocks...")
-            with rasterio.open(output_file, 'w', **dst_meta) as dst:
-                # Calculate number of blocks needed
-                n_blocks_x = int(np.ceil(new_width / BLOCK_SIZE))
-                n_blocks_y = int(np.ceil(new_height / BLOCK_SIZE))
-                total_blocks = n_blocks_x * n_blocks_y
+            for band_idx in range(1, src.count + 1):
+                band_start_time = time.time()
+                print(f"\nProcessing band {band_idx}/{src.count}")
+                timing_stats['block_processing_details'][band_idx] = {}
                 
-                # Process each band
-                for band_idx in range(1, src.count + 1):
-                    print(f"\nProcessing band {band_idx}/{src.count}")
-                    
-                    # Process blocks with progress bar
-                    with tqdm(total=total_blocks, desc="Processing blocks") as pbar:
-                        for block_y in range(n_blocks_y):
-                            for block_x in range(n_blocks_x):
-                                # Calculate block dimensions
-                                block_width = min(BLOCK_SIZE, new_width - block_x * BLOCK_SIZE)
-                                block_height = min(BLOCK_SIZE, new_height - block_y * BLOCK_SIZE)
+                block_times = []  # Store processing time for each block
+                with tqdm(total=total_blocks, desc=f"Band {band_idx}") as pbar:
+                    for block_y in range(n_blocks_y):
+                        for block_x in range(n_blocks_x):
+                            block_start_time = time.time()
+                            
+                            # Calculate block dimensions
+                            block_width = min(BLOCK_SIZE, new_width - block_x * BLOCK_SIZE)
+                            block_height = min(BLOCK_SIZE, new_height - block_y * BLOCK_SIZE)
+                            
+                            # SUBSECTION 4.1: Create coordinate grid
+                            grid_start = time.time()
+                            block_rows, block_cols = np.mgrid[
+                                block_y * BLOCK_SIZE:block_y * BLOCK_SIZE + block_height,
+                                block_x * BLOCK_SIZE:block_x * BLOCK_SIZE + block_width
+                            ]
+                            output_coords = np.stack((block_cols.flatten(), block_rows.flatten()), axis=1)
+                            grid_time = time.time() - grid_start
+                            
+                            # SUBSECTION 4.2: World coordinate conversion
+                            world_start = time.time()
+                            x = output_coords[:, 0]
+                            y = output_coords[:, 1]
+                            output_world_coords = np.column_stack([
+                                new_transform.a * x + new_transform.b * y + new_transform.c,
+                                new_transform.d * x + new_transform.e * y + new_transform.f
+                            ])
+                            output_world_3d = np.column_stack((output_world_coords, np.zeros(len(output_world_coords))))
+                            world_time = time.time() - world_start
+                            
+                            # SUBSECTION 4.3: Apply transformation
+                            transform_start = time.time()
+                            source_coords = transform_coordinates(output_world_3d, inverse_params)
+                            transform_time = time.time() - transform_start
+                            
+                            # SUBSECTION 4.4: Convert to source pixels
+                            pixel_start = time.time()
+                            x = source_coords[:, 0]
+                            y = source_coords[:, 1]
+                            src_inv = ~src_transform
+                            source_pixels = np.column_stack([
+                                src_inv.a * x + src_inv.b * y + src_inv.c,
+                                src_inv.d * x + src_inv.e * y + src_inv.f
+                            ])
+                            pixel_time = time.time() - pixel_start
+                            
+                            # SUBSECTION 4.5: Interpolation and writing
+                            interp_start = time.time()
+                            valid_x = (source_pixels[:, 0] >= 0) & (source_pixels[:, 0] < src.width)
+                            valid_y = (source_pixels[:, 1] >= 0) & (source_pixels[:, 1] < src.height)
+                            valid_pixels = valid_x & valid_y
+                            
+                            block_data = np.full((block_height, block_width), nodata, dtype=src.dtypes[0])
+                            
+                            if np.any(valid_pixels):
+                                source_data = src.read(band_idx)
+                                source_nodata_mask = source_data == nodata
+                                source_data_float = source_data.astype(np.float64)
+                                source_data_float[source_nodata_mask] = np.nan
                                 
-                                # Create coordinate grid for this block
-                                block_rows, block_cols = np.mgrid[
-                                    block_y * BLOCK_SIZE:block_y * BLOCK_SIZE + block_height,
-                                    block_x * BLOCK_SIZE:block_x * BLOCK_SIZE + block_width
-                                ]
+                                valid_source_pixels = source_pixels[valid_pixels]
                                 
-                                # Flatten coordinates
-                                output_coords = np.stack((block_cols.flatten(), block_rows.flatten()), axis=1)
-                                
-                                # Convert to world coordinates (vectorized)
-                                x = output_coords[:, 0]
-                                y = output_coords[:, 1]
-                                output_world_coords = np.column_stack([
-                                    new_transform.a * x + new_transform.b * y + new_transform.c,
-                                    new_transform.d * x + new_transform.e * y + new_transform.f
-                                ])
-                                
-                                # Add z=0 for transformation
-                                output_world_3d = np.column_stack((output_world_coords, np.zeros(len(output_world_coords))))
-                                
-                                # Apply inverse transformation
-                                source_coords = transform_coordinates(output_world_3d, inverse_params)
-                                
-                                # Convert back to pixel coordinates (vectorized)
-                                x = source_coords[:, 0]
-                                y = source_coords[:, 1]
-                                src_inv = ~src_transform
-                                source_pixels = np.column_stack([
-                                    src_inv.a * x + src_inv.b * y + src_inv.c,
-                                    src_inv.d * x + src_inv.e * y + src_inv.f
-                                ])
-                                
-                                # Create mask for valid pixels
-                                valid_x = (source_pixels[:, 0] >= 0) & (source_pixels[:, 0] < src.width)
-                                valid_y = (source_pixels[:, 1] >= 0) & (source_pixels[:, 1] < src.height)
-                                valid_pixels = valid_x & valid_y
-                                
-                                # Initialize block data with NoData value
-                                block_data = np.full((block_height, block_width), nodata, dtype=src.dtypes[0])
-                                
-                                if np.any(valid_pixels):
-                                    # Read source data for the current band
-                                    source_data = src.read(band_idx)
-                                    
-                                    # Create a mask for NoData values in source data
-                                    source_nodata_mask = source_data == nodata
-                                    
-                                    # Convert source NoData to NaN for interpolation
-                                    source_data_float = source_data.astype(np.float64)
-                                    source_data_float[source_nodata_mask] = np.nan
-                                    
-                                    # Get valid source pixels
-                                    valid_source_pixels = source_pixels[valid_pixels]
-                                    
-                                    # Perform interpolation with NaN handling
-                                    resampled_values = map_coordinates(
-                                        source_data_float,
-                                        [valid_source_pixels[:, 1], valid_source_pixels[:, 0]],
-                                        order=1,
-                                        mode='constant',
-                                        cval=np.nan
-                                    )
-                                    
-                                    # Convert NaN back to NoData value
-                                    resampled_values = np.nan_to_num(resampled_values, nan=nodata)
-                                    
-                                    # Reshape block data
-                                    block_data_flat = block_data.ravel()
-                                    block_data_flat[valid_pixels] = resampled_values
-                                    block_data = block_data_flat.reshape((block_height, block_width))
-                                
-                                # Write block to output
-                                dst.write(
-                                    block_data,
-                                    band_idx,
-                                    window=Window(
-                                        block_x * BLOCK_SIZE,
-                                        block_y * BLOCK_SIZE,
-                                        block_width,
-                                        block_height
-                                    )
+                                resampled_values = map_coordinates(
+                                    source_data_float,
+                                    [valid_source_pixels[:, 1], valid_source_pixels[:, 0]],
+                                    order=1,
+                                    mode='constant',
+                                    cval=np.nan
                                 )
                                 
-                                pbar.update(1)
-                                
-                    # Copy band description
-                    dst.set_band_description(band_idx, src.descriptions[band_idx-1] or '')
+                                resampled_values = np.nan_to_num(resampled_values, nan=nodata)
+                                block_data_flat = block_data.ravel()
+                                block_data_flat[valid_pixels] = resampled_values
+                                block_data = block_data_flat.reshape((block_height, block_width))
+                            
+                            dst.write(
+                                block_data,
+                                band_idx,
+                                window=Window(
+                                    block_x * BLOCK_SIZE,
+                                    block_y * BLOCK_SIZE,
+                                    block_width,
+                                    block_height
+                                )
+                            )
+                            interp_time = time.time() - interp_start
+                            
+                            # Store timing for first block of each band
+                            if block_x == 0 and block_y == 0:
+                                timing_stats['block_processing_details'][band_idx] = {
+                                    'grid_creation': grid_time,
+                                    'world_coords': world_time,
+                                    'transformation': transform_time,
+                                    'pixel_conversion': pixel_time,
+                                    'interpolation': interp_time,
+                                    'total_block_time': time.time() - block_start_time
+                                }
+                            
+                            block_times.append(time.time() - block_start_time)
+                            pbar.update(1)
+                
+                # Store band processing statistics
+                band_time = time.time() - band_start_time
+                timing_stats['block_processing'][band_idx] = {
+                    'total_time': band_time,
+                    'average_block_time': np.mean(block_times),
+                    'min_block_time': np.min(block_times),
+                    'max_block_time': np.max(block_times)
+                }
+                
+                # Copy band description
+                dst.set_band_description(band_idx, src.descriptions[band_idx-1] or '')
+        
+        # Calculate and print final statistics
+        total_time = time.time() - total_start_time
+        timing_stats['total_time'] = total_time
+        
+        print("\n=== Timing Analysis ===")
+        print(f"Total processing time: {total_time:.2f} seconds")
+        print(f"Initialization: {timing_stats['initialization']:.2f} seconds ({(timing_stats['initialization']/total_time)*100:.1f}%)")
+        print(f"Dimension calculation: {timing_stats['dimension_calculation']:.2f} seconds ({(timing_stats['dimension_calculation']/total_time)*100:.1f}%)")
+        
+        print("\nPer-band processing times:")
+        for band_idx, stats in timing_stats['block_processing'].items():
+            print(f"\nBand {band_idx}:")
+            print(f"- Total time: {stats['total_time']:.2f} seconds ({(stats['total_time']/total_time)*100:.1f}%)")
+            print(f"- Average block time: {stats['average_block_time']:.3f} seconds")
+            print(f"- Min block time: {stats['min_block_time']:.3f} seconds")
+            print(f"- Max block time: {stats['max_block_time']:.3f} seconds")
+            
+            # Print detailed timing for first block
+            block_details = timing_stats['block_processing_details'][band_idx]
+            print(f"\nDetailed timing for first block of Band {band_idx}:")
+            print(f"- Grid creation: {block_details['grid_creation']:.3f} seconds")
+            print(f"- World coordinate conversion: {block_details['world_coords']:.3f} seconds")
+            print(f"- Transformation: {block_details['transformation']:.3f} seconds")
+            print(f"- Pixel conversion: {block_details['pixel_conversion']:.3f} seconds")
+            print(f"- Interpolation and writing: {block_details['interpolation']:.3f} seconds")
         
         print(f"\nSuccessfully transformed GeoTIFF: {new_width}x{new_height} pixels")
+        print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
     except Exception as e:
         print(f"Error transforming GeoTIFF: {str(e)}")
