@@ -867,6 +867,10 @@ def transform_geotiff(input_file, output_file, params):
                                 block_data_flat[valid_pixels] = resampled_values
                                 block_data = block_data_flat.reshape((block_height, block_width))
                             
+                            interp_time = time.time() - interp_start
+                            
+                            # SUBSECTION 4.6: Data writing
+                            writing_start = time.time()
                             dst.write(
                                 block_data,
                                 band_idx,
@@ -877,7 +881,8 @@ def transform_geotiff(input_file, output_file, params):
                                     block_height
                                 )
                             )
-                            interp_time = time.time() - interp_start
+                            
+                            writing_time = time.time() - writing_start
                             
                             # Store timing for first block of each band
                             if block_x == 0 and block_y == 0:
@@ -887,6 +892,7 @@ def transform_geotiff(input_file, output_file, params):
                                     'transformation': transform_time,
                                     'pixel_conversion': pixel_time,
                                     'interpolation': interp_time,
+                                    'writing': writing_time,
                                     'total_block_time': time.time() - block_start_time
                                 }
                             
@@ -929,7 +935,8 @@ def transform_geotiff(input_file, output_file, params):
             print(f"- World coordinate conversion: {block_details['world_coords']:.3f} seconds")
             print(f"- Transformation: {block_details['transformation']:.3f} seconds")
             print(f"- Pixel conversion: {block_details['pixel_conversion']:.3f} seconds")
-            print(f"- Interpolation and writing: {block_details['interpolation']:.3f} seconds")
+            print(f"- Interpolation: {block_details['interpolation']:.3f} seconds")
+            print(f"- Writing: {block_details['writing']:.3f} seconds")
         
         print(f"\nSuccessfully transformed GeoTIFF: {new_width}x{new_height} pixels")
         print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
