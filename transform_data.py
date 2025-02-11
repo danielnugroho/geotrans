@@ -13,6 +13,7 @@ __license__ = "MIT"  # or appropriate license
 
 # 1.0.6 (2025-02-11)
 # - combined three subsections in transform_geotiff for multiprocessing
+# - move the band data reading section to outside blocks loop
 
 # 1.0.5 (2025-02-11)
 # - started to employ multiprocessing on world coord trf successfully
@@ -828,6 +829,15 @@ def transform_geotiff(input_file, output_file, params):
                 timing_stats['block_processing_details'][band_idx] = {}
                 
                 block_times = []  # Store processing time for each block
+                
+                # Read source band just outside of the block loop
+                reading_start = time.time()
+                source_data = src.read(band_idx)
+                source_nodata_mask = source_data == nodata
+                source_data_float = source_data.astype(np.float64)
+                source_data_float[source_nodata_mask] = np.nan
+                reading_time = time.time() - reading_start
+                
                 with tqdm(total=total_blocks, desc=f"Band {band_idx}") as pbar:
                     for block_y in range(n_blocks_y):
                         for block_x in range(n_blocks_x):
@@ -864,6 +874,7 @@ def transform_geotiff(input_file, output_file, params):
                             
                             # SUBSECTION 4.3: Interpolation
                             interp_start = time.time()
+                            
                             valid_x = (source_pixels[:, 0] >= 0) & (source_pixels[:, 0] < src.width)
                             valid_y = (source_pixels[:, 1] >= 0) & (source_pixels[:, 1] < src.height)
                             valid_pixels = valid_x & valid_y
@@ -871,10 +882,11 @@ def transform_geotiff(input_file, output_file, params):
                             block_data = np.full((block_height, block_width), nodata, dtype=src.dtypes[0])
                             
                             if np.any(valid_pixels):
-                                source_data = src.read(band_idx)
-                                source_nodata_mask = source_data == nodata
-                                source_data_float = source_data.astype(np.float64)
-                                source_data_float[source_nodata_mask] = np.nan
+                                #print("---read source band")
+                                #source_data = src.read(band_idx)
+                                #source_nodata_mask = source_data == nodata
+                                #source_data_float = source_data.astype(np.float64)
+                                #source_data_float[source_nodata_mask] = np.nan
                                 
                                 valid_source_pixels = source_pixels[valid_pixels]
                                 
@@ -948,7 +960,8 @@ def transform_geotiff(input_file, output_file, params):
         for band_idx, stats in timing_stats['block_processing'].items():
             print(f"\nBand {band_idx}:")
             print(f"- Total time: {stats['total_time']:.2f} seconds ({(stats['total_time']/total_time)*100:.1f}%)")
-            print(f"- Average block time: {stats['average_block_time']:.3f} seconds")
+            print(f"- Data reading time: {stats['average_block_time']:.3f} seconds")
+            print(f"- Average block time: {reading_time:.3f} seconds")
             print(f"- Min block time: {stats['min_block_time']:.3f} seconds")
             print(f"- Max block time: {stats['max_block_time']:.3f} seconds")
             
@@ -956,9 +969,7 @@ def transform_geotiff(input_file, output_file, params):
             block_details = timing_stats['block_processing_details'][band_idx]
             print(f"\nDetailed timing for first block of Band {band_idx}:")
             print(f"- Grid creation: {block_details['grid_creation']:.3f} seconds")
-            #print(f"- World coordinate conversion: {block_details['world_coords']:.3f} seconds")
             print(f"- Transformation: {block_details['transformation']:.3f} seconds")
-            #print(f"- Pixel conversion: {block_details['pixel_conversion']:.3f} seconds")
             print(f"- Interpolation: {block_details['interpolation']:.3f} seconds")
             print(f"- Writing: {block_details['writing']:.3f} seconds")
         
