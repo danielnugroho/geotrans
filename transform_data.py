@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
@@ -10,6 +10,9 @@ __license__ = "MIT"  # or appropriate license
 
 # Version History
 # --------------
+
+# 1.0.6 (2025-02-11)
+# - combined three subsections in transform_geotiff for multiprocessing
 
 # 1.0.5 (2025-02-11)
 # - started to employ multiprocessing on world coord trf successfully
@@ -115,14 +118,22 @@ import json
 import csv
 import sys
 import os
+import ray
 from pathlib import Path
 import ezdxf
 from ezdxf.math import Vec3
 import rasterio
 from datetime import datetime
 from scipy.ndimage import map_coordinates
+
+from rasterio.transform import from_origin
+from rasterio.windows import Window
+from tqdm import tqdm
+import time
+
 import warnings
 warnings.filterwarnings('ignore', category=rasterio.errors.NotGeoreferencedWarning)
+
 
 # [Previous functions remain the same until transform_dxf]
 # Include all the previous functions for CSV, LAZ, and DXF processing
@@ -649,14 +660,13 @@ def transform_corners(corners, params):
     # Return as list of (x, y) tuples
     return [(point[0], point[1]) for point in transformed]
 
-import ray
-
 # Initialize Ray (call this once at the beginning of your script)
 ray.init()
 
 # Define a Ray remote function for world coordinate conversion
 @ray.remote
-def convert_to_world_coords(output_coords_chunk, new_transform):
+def parallel_coordinate_transform(output_coords_chunk, src_transform, new_transform, inverse_params):
+    
     """Convert a chunk of output coordinates to world coordinates using Ray."""
     x = output_coords_chunk[:, 0]
     y = output_coords_chunk[:, 1]
@@ -664,8 +674,20 @@ def convert_to_world_coords(output_coords_chunk, new_transform):
         new_transform.a * x + new_transform.b * y + new_transform.c,
         new_transform.d * x + new_transform.e * y + new_transform.f
     ])
-    return output_world_coords
+    output_world_3d = np.column_stack((output_world_coords, np.zeros(len(output_world_coords))))
 
+    source_coords = transform_coordinates(output_world_3d, inverse_params)
+
+    x = source_coords[:, 0]
+    y = source_coords[:, 1]
+    src_inv = ~src_transform
+    source_pixels = np.column_stack([
+        src_inv.a * x + src_inv.b * y + src_inv.c,
+        src_inv.d * x + src_inv.e * y + src_inv.f
+    ])
+    
+    return source_pixels
+                            
 def transform_geotiff(input_file, output_file, params):
     """
     Memory-efficient GeoTIFF transformation with timing analysis for each major section.
@@ -676,13 +698,6 @@ def transform_geotiff(input_file, output_file, params):
         output_file (str): Path to output GeoTIFF file
         params (dict): Dictionary containing transformation parameters
     """
-    import rasterio
-    import numpy as np
-    from rasterio.transform import from_origin
-    from rasterio.windows import Window
-    from tqdm import tqdm
-    import time
-    from datetime import datetime
 
     # Block size for processing (adjust based on available memory)
     BLOCK_SIZE = 16384
@@ -831,40 +846,23 @@ def transform_geotiff(input_file, output_file, params):
                             output_coords = np.stack((block_cols.flatten(), block_rows.flatten()), axis=1)
                             grid_time = time.time() - grid_start
                             
-                            # SUBSECTION 4.2: World coordinate conversion (Parallelized with Ray)
-                            world_start = time.time()
-                            
+                            # SUBSECTION 4.2: Coordinate transformation
+                            transform_start = time.time()
+
                             # Split the output_coords into chunks for parallel processing
                             num_chunks = ray.available_resources().get('CPU', 1)  # Use available CPUs
-                            chunks = np.array_split(output_coords, num_chunks)
-                            
-                            # Use Ray to parallelize the world coordinate conversion
-                            futures = [convert_to_world_coords.remote(chunk, new_transform) for chunk in chunks]
-                            output_world_coords_chunks = ray.get(futures)
+                            chunks = np.array_split(output_coords, num_chunks)                            
+
+                            # Use Ray to parallelize the coordinate transformation
+                            futures = [parallel_coordinate_transform.remote(chunk, src_transform, new_transform, inverse_params) for chunk in chunks]
+                            source_pixel_chunks = ray.get(futures)
                             
                             # Combine the results
-                            output_world_coords = np.vstack(output_world_coords_chunks)
-                            output_world_3d = np.column_stack((output_world_coords, np.zeros(len(output_world_coords))))
+                            source_pixels = np.vstack(source_pixel_chunks)                            
                             
-                            world_time = time.time() - world_start
-                            
-                            # SUBSECTION 4.3: Apply transformation
-                            transform_start = time.time()
-                            source_coords = transform_coordinates(output_world_3d, inverse_params)
                             transform_time = time.time() - transform_start
                             
-                            # SUBSECTION 4.4: Convert to source pixels
-                            pixel_start = time.time()
-                            x = source_coords[:, 0]
-                            y = source_coords[:, 1]
-                            src_inv = ~src_transform
-                            source_pixels = np.column_stack([
-                                src_inv.a * x + src_inv.b * y + src_inv.c,
-                                src_inv.d * x + src_inv.e * y + src_inv.f
-                            ])
-                            pixel_time = time.time() - pixel_start
-                            
-                            # SUBSECTION 4.5: Interpolation
+                            # SUBSECTION 4.3: Interpolation
                             interp_start = time.time()
                             valid_x = (source_pixels[:, 0] >= 0) & (source_pixels[:, 0] < src.width)
                             valid_y = (source_pixels[:, 1] >= 0) & (source_pixels[:, 1] < src.height)
@@ -895,7 +893,7 @@ def transform_geotiff(input_file, output_file, params):
                             
                             interp_time = time.time() - interp_start
                             
-                            # SUBSECTION 4.6: Data writing
+                            # SUBSECTION 4.4: Data writing
                             writing_start = time.time()
                             dst.write(
                                 block_data,
@@ -914,9 +912,9 @@ def transform_geotiff(input_file, output_file, params):
                             if block_x == 0 and block_y == 0:
                                 timing_stats['block_processing_details'][band_idx] = {
                                     'grid_creation': grid_time,
-                                    'world_coords': world_time,
+                                    #'world_coords': world_time,
                                     'transformation': transform_time,
-                                    'pixel_conversion': pixel_time,
+                                    #'pixel_conversion': pixel_time,
                                     'interpolation': interp_time,
                                     'writing': writing_time,
                                     'total_block_time': time.time() - block_start_time
@@ -958,9 +956,9 @@ def transform_geotiff(input_file, output_file, params):
             block_details = timing_stats['block_processing_details'][band_idx]
             print(f"\nDetailed timing for first block of Band {band_idx}:")
             print(f"- Grid creation: {block_details['grid_creation']:.3f} seconds")
-            print(f"- World coordinate conversion: {block_details['world_coords']:.3f} seconds")
+            #print(f"- World coordinate conversion: {block_details['world_coords']:.3f} seconds")
             print(f"- Transformation: {block_details['transformation']:.3f} seconds")
-            print(f"- Pixel conversion: {block_details['pixel_conversion']:.3f} seconds")
+            #print(f"- Pixel conversion: {block_details['pixel_conversion']:.3f} seconds")
             print(f"- Interpolation: {block_details['interpolation']:.3f} seconds")
             print(f"- Writing: {block_details['writing']:.3f} seconds")
         
@@ -1049,5 +1047,7 @@ def main():
         print(f"\nError during transformation: {str(e)}")
         sys.exit(1)
 
+    ray.shutdown()
+    
 if __name__ == "__main__":
     main()
