@@ -661,9 +661,6 @@ def transform_corners(corners, params):
     # Return as list of (x, y) tuples
     return [(point[0], point[1]) for point in transformed]
 
-# Initialize Ray (call this once at the beginning of your script)
-ray.init()
-
 # Define a Ray remote function for world coordinate conversion
 @ray.remote
 def parallel_coordinate_transform(output_coords_chunk, src_transform, new_transform, inverse_params):
@@ -699,6 +696,9 @@ def transform_geotiff(input_file, output_file, params):
         output_file (str): Path to output GeoTIFF file
         params (dict): Dictionary containing transformation parameters
     """
+
+    # Initialize Ray (call this once at the beginning of your script)
+    ray.init()    
 
     # Block size for processing (adjust based on available memory)
     BLOCK_SIZE = 16384
@@ -980,6 +980,9 @@ def transform_geotiff(input_file, output_file, params):
         print(f"Error transforming GeoTIFF: {str(e)}")
         raise
 
+    finally:
+        ray.shutdown()
+
 def main():
     # Check command line arguments
     if len(sys.argv) != 4:
@@ -1058,7 +1061,6 @@ def main():
         print(f"\nError during transformation: {str(e)}")
         sys.exit(1)
 
-    ray.shutdown()
     
 if __name__ == "__main__":
     main()
