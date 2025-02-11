@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
-__date__ = "2025-02-10"
+__date__ = "2025-02-11"
 __copyright__ = "Copyright (c) 2025"
 __license__ = "MIT"  # or appropriate license
 
 # Version History
 # --------------
+
+# 1.0.7 (2025-02-11)
+# - general code cleanup
+# - parallel processing implemented for point cloud transformation
 
 # 1.0.6 (2025-02-11)
 # - combined three subsections in transform_geotiff for multiprocessing
@@ -115,7 +119,6 @@ Notes:
 
 import numpy as np
 import pdal
-import json
 import csv
 import sys
 import os
@@ -123,18 +126,8 @@ import ray
 from pathlib import Path
 import ezdxf
 from ezdxf.math import Vec3
-import rasterio
 from datetime import datetime
-from scipy.ndimage import map_coordinates
-
-from rasterio.transform import from_origin
-from rasterio.windows import Window
 from tqdm import tqdm
-import time
-
-import warnings
-warnings.filterwarnings('ignore', category=rasterio.errors.NotGeoreferencedWarning)
-
 
 # [Previous functions remain the same until transform_dxf]
 # Include all the previous functions for CSV, LAZ, and DXF processing
@@ -294,8 +287,14 @@ def transform_coordinates(coords, params):
 
 
 def transform_pointcloud(input_file, output_file, params):
-    """Transform LAZ/LAS point cloud coordinates using PDAL"""
+    """Transform LAZ/LAS point cloud coordinates using PDAL with parallel processing via Ray."""
+    
+    import json
+    
     try:
+        # Initialize Ray
+        ray.init()
+
         # Define PDAL pipeline for reading the input file
         read_pipeline = [
             {
@@ -317,9 +316,22 @@ def transform_pointcloud(input_file, output_file, params):
         points = arrays[0]
         coords = np.vstack((points['X'], points['Y'], points['Z'])).transpose()
 
-        # Apply transformation
-        print("Applying transformation...")
-        transformed_coords = transform_coordinates(coords, params)
+        # Define a Ray remote function for transforming a chunk of coordinates
+        @ray.remote
+        def transform_chunk(chunk, params):
+            return transform_coordinates(chunk, params)
+
+        # Split the coordinates into chunks for parallel processing
+        num_chunks = ray.available_resources().get('CPU', 1)  # Use available CPUs
+        chunks = np.array_split(coords, num_chunks)
+
+        # Use Ray to parallelize the transformation
+        print("Applying transformation in parallel...")
+        futures = [transform_chunk.remote(chunk, params) for chunk in chunks]
+        transformed_chunks = ray.get(futures)
+
+        # Combine the transformed chunks
+        transformed_coords = np.vstack(transformed_chunks)
 
         # Update the point coordinates
         points['X'] = transformed_coords[:, 0]
@@ -334,9 +346,9 @@ def transform_pointcloud(input_file, output_file, params):
                 "offset_x": "auto",
                 "offset_y": "auto",
                 "offset_z": "auto",
-                "scale_x": 0.01,
-                "scale_y": 0.01,
-                "scale_z": 0.01
+                "scale_x": 0.001,
+                "scale_y": 0.001,
+                "scale_z": 0.001
             }
         ]
 
@@ -351,7 +363,9 @@ def transform_pointcloud(input_file, output_file, params):
         print(f"Error transforming point cloud: {str(e)}")
         raise  # This will show the full error traceback
         sys.exit(1)
-
+    finally:
+        ray.shutdown()
+        
 def transform_csv_data(input_file, output_file, params):
     """Transform CSV coordinate data"""
     try:
@@ -369,26 +383,6 @@ def transform_csv_data(input_file, output_file, params):
     except Exception as e:
         print(f"Error transforming CSV data: {str(e)}")
         sys.exit(1)
-
-def cleanup_dxf(doc):
-    """Remove unnecessary sections and entries for better compatibility"""
-    # Remove all classes for simplicity
-    #if doc.classes is not None:
-    #    doc.classes.clear()  
-        
-    # Simplify the OBJECTS section by removing complex dictionaries
-    try:
-        if 'ACAD_COLOR' in doc.rootdict:
-            del doc.rootdict['ACAD_COLOR']
-        if 'EZDXF_META' in doc.rootdict:
-            del doc.rootdict['EZDXF_META']
-        if 'ACAD_XREC_ROUNDTRIP' in doc.rootdict:
-            del doc.rootdict['ACAD_XREC_ROUNDTRIP']
-    except Exception as e:
-        print(f"Warning: Could not remove some dictionary entries: {str(e)}")
-
-    # Force older version compatibility
-    doc.header['$ACADVER'] = 'AC1014'  # R14 version
 
 def transform_point(point, transform_func):
     """
@@ -619,47 +613,6 @@ def transform_dxf(input_file, output_file, params):
         print(f"Error transforming DXF file: {str(e)}")
         raise
 
-def compute_corner_coordinates(transform, width, height):
-    """Compute corner coordinates (pixel centers) of the raster"""
-    return [
-        transform * (0.5, 0.5),             # Upper-left (pixel center)
-        transform * (width - 0.5, 0.5),     # Upper-right
-        transform * (width - 0.5, height - 0.5),  # Lower-right
-        transform * (0.5, height - 0.5)     # Lower-left
-    ]
-
-
-def compute_transformed_dimensions(transformed_corners, original_transform):
-    """Calculate new raster dimensions based on transformed bounds and original resolution"""
-    # Extract coordinates and find bounding box
-    xs = [x for x, y in transformed_corners]
-    ys = [y for x, y in transformed_corners]
-    
-    min_x = min(xs)
-    max_x = max(xs)
-    min_y = min(ys)
-    max_y = max(ys)
-    
-    # Get original pixel size from transform
-    pixel_width = original_transform.a
-    pixel_height = original_transform.e  # Negative value for north-up
-    
-    # Calculate new dimensions (add 1 pixel buffer)
-    new_width = int(np.ceil((max_x - min_x) / abs(pixel_width))) + 1
-    new_height = int(np.ceil((max_y - min_y) / abs(pixel_height))) + 1
-    
-    return (new_width, new_height), (min_x, max_y)
-
-def transform_corners(corners, params):
-    """Transform corner coordinates using given parameters"""
-    # Convert corners to numpy array
-    coords = np.array([[x, y, 0] for x, y in corners])
-    
-    # Apply transformation
-    transformed = transform_coordinates(coords, params)
-    
-    # Return as list of (x, y) tuples
-    return [(point[0], point[1]) for point in transformed]
 
 # Define a Ray remote function for world coordinate conversion
 @ray.remote
@@ -696,6 +649,13 @@ def transform_geotiff(input_file, output_file, params):
         output_file (str): Path to output GeoTIFF file
         params (dict): Dictionary containing transformation parameters
     """
+    
+    # import required packages
+    import rasterio
+    from rasterio.transform import from_origin
+    from rasterio.windows import Window
+    from scipy.ndimage import map_coordinates
+    import time
 
     # Initialize Ray (call this once at the beginning of your script)
     ray.init()    
