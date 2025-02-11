@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
-__date__ = "2025-02-07"
-__copyright__ = "Copyright (c) 2025"
-__license__ = "MIT"  # or appropriate license
+__date__ = "2025-02-12"
+__copyright__ = "Copyright (c) 2025 Daniel Adi Nugroho"
+__license__ = "GNU General Public License v3.0 (GPL-3.0)"
 
 # Version History
 # --------------
+
+# 1.1.0 (2025-02-12)
+# - First fully functional version, with parallel processing implemented
+# - Source code cleanup and modification to GNU-GPL license instead of MIT
+
 # 1.0.0 (2025-02-07)
 # - Initial release
 # - Support for 2D and 3D transformations
@@ -19,7 +24,7 @@ __license__ = "MIT"  # or appropriate license
 
 
 """
-Coordinate Transformation Module
+Coordinate Transformation Computation Module
 ==============================
 
 This module provides functionality for transforming coordinates between different coordinate systems
@@ -34,7 +39,7 @@ Purpose:
 
 Requirements:
 ------------
-- Python 3.6 or higher
+- Python 3.10 or higher
 - Required packages: numpy, scipy
 - Input data must be in CSV format
 
@@ -91,6 +96,25 @@ Enter path to source coordinates CSV: source_points.csv
 Enter path to target coordinates CSV: target_points.csv
 Choose transformation mode (2D/3D): 3D
 Choose transformation type (helmert/affine): helmert
+
+
+
+GNU GENERAL PUBLIC LICENSE
+--------------------------
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 
 """
 
