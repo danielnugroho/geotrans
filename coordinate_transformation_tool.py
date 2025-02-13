@@ -422,10 +422,8 @@ class TransformationApp:
             #messagebox.showerror("Cleanup Error", f"Error during cleanup: {str(e)}")
             print("Cleanup Error", f"Error during cleanup: {str(e)}")
         finally:
-            if sys.platform.startswith('win'):
-                os._exit(0)  # Force exit on Windows
-            else:
-                sys.exit(0)
+            # Use sys.exit for a graceful termination
+            sys.exit(0)
 
     def __del__(self):
         """Destructor as final safety net"""
