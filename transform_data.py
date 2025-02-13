@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
-__date__ = "2025-02-12"
+__date__ = "2025-02-13"
 __copyright__ = "Copyright (c) 2025 Daniel Adi Nugroho"
 __license__ = "GNU General Public License v3.0 (GPL-3.0)"
 
 # Version History
 # --------------
+
+# 1.1.1 (2025-02-13)
+# - Replaced Ray parallel processing with Python's standard multiprocessing.
 
 # 1.1.0 (2025-02-12)
 # - First fully functional version, with parallel processing implemented
@@ -146,12 +149,13 @@ import pdal
 import csv
 import sys
 import os
-import ray
 from pathlib import Path
 import ezdxf
 from ezdxf.math import Vec3
 from datetime import datetime
 from tqdm import tqdm
+import multiprocessing as mp
+import json
 
 # [Previous functions remain the same until transform_dxf]
 # Include all the previous functions for CSV, LAZ, and DXF processing
@@ -311,14 +315,9 @@ def transform_coordinates(coords, params):
 
 
 def transform_pointcloud(input_file, output_file, params):
-    """Transform LAZ/LAS point cloud coordinates using PDAL with parallel processing via Ray."""
-    
-    import json
+    """Transform LAZ/LAS point cloud coordinates using PDAL with parallel processing via multiprocessing."""
     
     try:
-        # Initialize Ray
-        ray.init()
-
         # Define PDAL pipeline for reading the input file
         read_pipeline = [
             {
@@ -340,19 +339,14 @@ def transform_pointcloud(input_file, output_file, params):
         points = arrays[0]
         coords = np.vstack((points['X'], points['Y'], points['Z'])).transpose()
 
-        # Define a Ray remote function for transforming a chunk of coordinates
-        @ray.remote
-        def transform_chunk(chunk, params):
-            return transform_coordinates(chunk, params)
-
         # Split the coordinates into chunks for parallel processing
-        num_chunks = ray.available_resources().get('CPU', 1)  # Use available CPUs
-        chunks = np.array_split(coords, num_chunks)
+        num_cpus = mp.cpu_count()
+        chunks = np.array_split(coords, num_cpus)
 
-        # Use Ray to parallelize the transformation
+        # Use multiprocessing to parallelize the transformation
         print("Applying transformation in parallel...")
-        futures = [transform_chunk.remote(chunk, params) for chunk in chunks]
-        transformed_chunks = ray.get(futures)
+        with mp.Pool(processes=num_cpus) as pool:
+            transformed_chunks = pool.starmap(transform_coordinates, [(chunk, params) for chunk in chunks])
 
         # Combine the transformed chunks
         transformed_coords = np.vstack(transformed_chunks)
@@ -387,8 +381,6 @@ def transform_pointcloud(input_file, output_file, params):
         print(f"Error transforming point cloud: {str(e)}")
         raise  # This will show the full error traceback
         sys.exit(1)
-    finally:
-        ray.shutdown()
         
 def transform_csv_data(input_file, output_file, params):
     """Transform CSV coordinate data"""
@@ -638,11 +630,9 @@ def transform_dxf(input_file, output_file, params):
         raise
 
 
-# Define a Ray remote function for world coordinate conversion
-@ray.remote
+# Define a function for world coordinate conversion
 def parallel_coordinate_transform(output_coords_chunk, src_transform, new_transform, inverse_params):
-    
-    """Convert a chunk of output coordinates to world coordinates using Ray."""
+    """Convert a chunk of output coordinates to world coordinates using multiprocessing."""
     x = output_coords_chunk[:, 0]
     y = output_coords_chunk[:, 1]
     output_world_coords = np.column_stack([
@@ -662,7 +652,7 @@ def parallel_coordinate_transform(output_coords_chunk, src_transform, new_transf
     ])
     
     return source_pixels
-                            
+                           
 def transform_geotiff(input_file, output_file, params):
     """
     Memory-efficient GeoTIFF transformation with timing analysis for each major section.
@@ -680,9 +670,6 @@ def transform_geotiff(input_file, output_file, params):
     from rasterio.windows import Window
     from scipy.ndimage import map_coordinates
     import time
-
-    # Initialize Ray (call this once at the beginning of your script)
-    ray.init()    
 
     # Block size for processing (adjust based on available memory)
     BLOCK_SIZE = 16384
@@ -842,18 +829,21 @@ def transform_geotiff(input_file, output_file, params):
                             
                             # SUBSECTION 4.2: Coordinate transformation
                             transform_start = time.time()
-
+                            
                             # Split the output_coords into chunks for parallel processing
-                            num_chunks = ray.available_resources().get('CPU', 1)  # Use available CPUs
-                            chunks = np.array_split(output_coords, num_chunks)                            
-
-                            # Use Ray to parallelize the coordinate transformation
-                            futures = [parallel_coordinate_transform.remote(chunk, src_transform, new_transform, inverse_params) for chunk in chunks]
-                            source_pixel_chunks = ray.get(futures)
-                            
+                            num_cpus = mp.cpu_count()  # Use available CPUs
+                            chunks = np.array_split(output_coords, num_cpus)
+                        
+                            # Use multiprocessing.Pool to parallelize the coordinate transformation
+                            with mp.Pool(processes=num_cpus) as pool:
+                                # Use starmap to pass multiple arguments to the function
+                                transformed_chunks = pool.starmap(
+                                    parallel_coordinate_transform,
+                                    [(chunk, src_transform, new_transform, inverse_params) for chunk in chunks]
+                                )
+                        
                             # Combine the results
-                            source_pixels = np.vstack(source_pixel_chunks)                            
-                            
+                            source_pixels = np.vstack(transformed_chunks)
                             transform_time = time.time() - transform_start
                             
                             # SUBSECTION 4.3: Interpolation
@@ -866,11 +856,6 @@ def transform_geotiff(input_file, output_file, params):
                             block_data = np.full((block_height, block_width), nodata, dtype=src.dtypes[0])
                             
                             if np.any(valid_pixels):
-                                #print("---read source band")
-                                #source_data = src.read(band_idx)
-                                #source_nodata_mask = source_data == nodata
-                                #source_data_float = source_data.astype(np.float64)
-                                #source_data_float[source_nodata_mask] = np.nan
                                 
                                 valid_source_pixels = source_pixels[valid_pixels]
                                 
@@ -964,8 +949,6 @@ def transform_geotiff(input_file, output_file, params):
         print(f"Error transforming GeoTIFF: {str(e)}")
         raise
 
-    finally:
-        ray.shutdown()
 
 def main():
     # Check command line arguments
