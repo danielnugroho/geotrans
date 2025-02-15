@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.1.0"
+__version__ = "1.1.2"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
-__date__ = "2025-02-12"
+__date__ = "2025-02-16"
 __copyright__ = "Copyright (c) 2025 Daniel Adi Nugroho"
 __license__ = "GNU General Public License v3.0 (GPL-3.0)"
 
 # Version History
 # --------------
+
+# 1.1.2 (2025-02-16)
+# - Prepopulate processing output text pane with copyright and license information
+# - Tested with Pyinstaller and PyInstaller-compiled EXE works as expected
+# - Works on any computer without Python installed
 
 # 1.1.0 (2025-02-12)
 # - First fully functional version, with parallel processing implemented
@@ -117,10 +122,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
 """
-
-import numpy as np
+print("LOCAL imports started")
+import sys, os, gc
+print("LOCAL TEST System imports finished.")
 from scipy.optimize import least_squares
+print("LOCAL Scipy imports finished")
+import numpy as np
+print("LOCAL Numpy imports finished")
 import csv
+print("LOCAL Localization imports finished")
 
 def read_csv(file_path):
     """
@@ -602,4 +612,5 @@ def main():
         save_transformation_params(params, mode, transform_type, param_file)
 
 if __name__ == "__main__":
+    print("LOCAL PROGRAM STARTED")
     main()

@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.1.0"
+__version__ = "1.1.2"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
-__date__ = "2025-02-12"
+__date__ = "2025-02-16"
 __copyright__ = "Copyright (c) 2025 Daniel Adi Nugroho"
 __license__ = "GNU General Public License v3.0 (GPL-3.0)"
 
 # Version History
 # --------------
+
+# 1.1.2 (2025-02-16)
+# - Prepopulate processing output text pane with copyright and license information
+# - Tested with Pyinstaller and PyInstaller-compiled EXE works as expected
+# - Works on any computer without Python installed
+
 # 1.1.0 (2025-02-12)
 # - First fully functional version, with parallel processing implemented
 # - Source code cleanup and modification to GNU-GPL license instead of MIT
@@ -113,16 +119,33 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-
+print("Core imports starts.")
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-from get_localization_params import read_csv, compute_transformation, save_transformation_params, print_results
-from transform_data import read_params, transform_csv_data, transform_pointcloud, transform_dxf, transform_geotiff
-import sys
-import os
-import gc
+print("Tkinter imports finished.")
+import sys, os, gc, datetime
+import platform, subprocess
+print("System imports finished.")
 from pathlib import Path
-import threading
+print("Pathlib imports finished.")
+import threading, multiprocessing
+print("Multithreading/mp imports finished.")
+print("Core imports finished.")
+
+from get_localization_params import read_csv, compute_transformation, save_transformation_params, print_results
+print("Localization params imports finished.")
+from transform_data import read_params, transform_csv_data, transform_pointcloud, transform_dxf, transform_geotiff
+print("Transform data imports finished.")
+
+# this is for rasterio pyinstaller compatibility
+print("Pyinstaler compatibility rasterio imports starts.")
+import rasterio
+import rasterio.control
+import rasterio.crs
+import rasterio.sample
+import rasterio.vrt
+import rasterio._features
+print("All imports finished.")
 
 class TransformationApp:
     def __init__(self, master):
@@ -171,6 +194,9 @@ class TransformationApp:
         self.console_text = scrolledtext.ScrolledText(console_frame, wrap=tk.WORD, height=15)
         self.console_text.pack(fill=tk.BOTH, expand=True)
         
+        # Display system information
+        self.display_system_info()
+
     def create_param_computation_ui(self, parent):
         # File Selection Section
         file_frame = ttk.LabelFrame(parent, text="Coordinate Files")
@@ -429,7 +455,117 @@ class TransformationApp:
         """Destructor as final safety net"""
         self.cleanup()
 
+    def get_system_specs(self):
+        """
+        Get detailed system specifications including CPU and RAM info.
+        Returns a dictionary with system specifications.
+        """
+        specs = {}
+        
+        try:
+            # First attempt: Try using psutil if available
+            import psutil
+            
+            # CPU Info
+            specs['processor'] = platform.processor()
+            specs['cpu_cores'] = psutil.cpu_count(logical=True)
+            specs['cpu_freq'] = f"{psutil.cpu_freq().max:.2f} MHz" if psutil.cpu_freq() else "Unknown"
+            
+            # RAM Info (convert to GB and round to 2 decimal places)
+            total_ram = psutil.virtual_memory().total
+            specs['ram'] = f"{total_ram / (1024**3):.2f} GB"
+            
+        except ImportError:
+            # Fallback for Windows: Use wmic commands
+            if platform.system() == 'Windows':
+                try:
+                    # Get CPU info
+                    cpu = subprocess.check_output('wmic cpu get name, maxclockspeed', shell=True).decode()
+                    cpu_lines = cpu.strip().split('\n')[1:]  # Skip header
+                    if cpu_lines:
+                        specs['processor'] = cpu_lines[0].strip()
+                    
+                    # Get logical processors count
+                    cpu_count = subprocess.check_output('wmic cpu get NumberOfLogicalProcessors', shell=True).decode()
+                    count_lines = cpu_count.strip().split('\n')[1:]
+                    if count_lines:
+                        specs['cpu_cores'] = count_lines[0].strip()
+                    
+                    # Get RAM info
+                    ram = subprocess.check_output('wmic computersystem get totalphysicalmemory', shell=True).decode()
+                    ram_lines = ram.strip().split('\n')[1:]
+                    if ram_lines:
+                        ram_bytes = int(ram_lines[0].strip())
+                        specs['ram'] = f"{ram_bytes / (1024**3):.2f} GB"
+                        
+                except:
+                    # If wmic fails, use basic info
+                    specs['processor'] = platform.processor()
+                    specs['cpu_cores'] = "Unknown"
+                    specs['ram'] = "Unknown"
+            else:
+                # For non-Windows systems, use basic info
+                specs['processor'] = platform.processor()
+                specs['cpu_cores'] = "Unknown"
+                specs['ram'] = "Unknown"
+        
+        return specs
+
+    def display_system_info(self):
+        """
+        Display system information in the console output panel when program starts.
+        """
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Get system specifications
+        specs = self.get_system_specs()
+        
+        info_text = f"""
+=== Coordinate Transformation Suite ===
+Started on: {current_time}
+Version: {__version__}
+{__copyright__}
+{__license__}
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+System Information:
+------------------
+OS: {platform.system()} {platform.version()}
+Architecture: {platform.machine()}
+Python Version: {sys.version.split()[0]}
+Running on: {platform.node()}
+
+Hardware Information:
+------------------
+Processor: {specs.get('processor', 'Unknown')}
+Logical Processors: {specs.get('cpu_cores', 'Unknown')}
+Processor Speed: {specs.get('cpu_freq', 'Unknown')}
+Total RAM: {specs.get('ram', 'Unknown')}
+
+Ready for coordinate transformation tasks.
+=======================================
+
+"""
+        # Insert the text into console
+        self.console_text.insert(tk.END, info_text)
+        self.console_text.see("1.0")
+
 if __name__ == "__main__":
+    print("MAIN PROGRAM STARTED")
+    multiprocessing.freeze_support()
+    print("MP freeze support placed.")
     root = tk.Tk()
     app = TransformationApp(root)
     root.mainloop()

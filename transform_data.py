@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
-__date__ = "2025-02-13"
+__date__ = "2025-02-16"
 __copyright__ = "Copyright (c) 2025 Daniel Adi Nugroho"
 __license__ = "GNU General Public License v3.0 (GPL-3.0)"
 
 # Version History
 # --------------
+
+# 1.1.2 (2025-02-16)
+# - Prepopulate processing output text pane with copyright and license information
+# - Tested with Pyinstaller and PyInstaller-compiled EXE works as expected
+# - Works on any computer without Python installed
 
 # 1.1.1 (2025-02-13)
 # - Replaced Ray parallel processing with Python's standard multiprocessing.
@@ -143,22 +148,21 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-
-import numpy as np
-import pdal
-import csv
-import sys
-import os
-from pathlib import Path
-import ezdxf
-from ezdxf.math import Vec3
+print("TRANSFORM imports started")
+import sys, os
 from datetime import datetime
-from tqdm import tqdm
+from pathlib import Path
+print("TRANSFORM System imports finished")
 import multiprocessing as mp
-import json
-
-# [Previous functions remain the same until transform_dxf]
-# Include all the previous functions for CSV, LAZ, and DXF processing
+print("TRANSFORM multiprocessing imports finished")
+import numpy as np
+print("TRANSFORM Numpy imports finished")
+import ezdxf, csv, json
+from ezdxf.math import Vec3
+from tqdm import tqdm
+print("TRANSFORM DXF imports finished")
+import pdal
+print("TRANSFORM PDAL imports finished")
 
 def read_params(param_file):
     """Read transformation parameters from file"""
@@ -1030,4 +1034,5 @@ def main():
 
     
 if __name__ == "__main__":
+    print("TRANSFORM PROGRAM STARTED")
     main()

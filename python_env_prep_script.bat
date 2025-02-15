@@ -1,12 +1,7 @@
 @echo off
-ECHO Create a new Conda environment named 'GEOTRANS-DEPLOY'
-conda create -n GEOTRANS-DEPLOY python=3.10
-ECHO Activate the environment
-conda activate GEOTRANS-DEPLOY
-ECHO Install required packages
-conda install -c conda-forge numpy scipy pandas pdal ezdxf rasterio tqdm
-ECHO Install additional packages via pip
-pip install ray pathlib
-ECHO Print success message
-ECHO Environment setup complete. Activate it using:
-ECHO conda activate GEOTRANS-DEPLOY
+conda create -n "geoda" python=3.11
+conda activate geoda
+conda install -c conda-forge pdal
+pip install ray numpy scipy pandas ezdxf rasterio tqdm pyinstaller
+pyinstaller --onefile --noconsole --clean --add-binary mkl_intel_thread.2.dll:. coordinate_transformation_tool.py
+rem We had a problem due to gdal installation which fails pyinstaller, hence gdal is not installed
