@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 __author__ = "Daniel Adi Nugroho"
 __email__ = "dnugroho@gmail.com"
 __status__ = "Production"
-__date__ = "2025-02-16"
+__date__ = "2025-02-27"
 __copyright__ = "Copyright (c) 2025 Daniel Adi Nugroho"
 __license__ = "GNU General Public License v3.0 (GPL-3.0)"
 
 # Version History
 # --------------
+
+# 1.2.0 (2025-02-27)
+# - Added batch transformation tab for processing multiple files functionality
 
 # 1.1.2 (2025-02-16)
 # - Prepopulate processing output text pane with copyright and license information
@@ -162,6 +165,8 @@ class TransformationApp:
         self.transform_input_file = tk.StringVar()
         self.transform_output_file = tk.StringVar()
         self.param_file = tk.StringVar()
+        self.batch_source_folder = tk.StringVar()
+        self.batch_target_folder = tk.StringVar()
         
         self.create_widgets()
         self.setup_output_redirect()
@@ -186,7 +191,12 @@ class TransformationApp:
         transform_frame = ttk.Frame(notebook)
         notebook.add(transform_frame, text='File Transformation')
         self.create_file_transform_ui(transform_frame)
-        
+
+        # Batch Transformation Tab        
+        batch_transform_frame = ttk.Frame(notebook)
+        notebook.add(batch_transform_frame, text='Batch Transformation')
+        self.create_batch_transform_ui(batch_transform_frame)
+
         # Console Output
         console_frame = ttk.LabelFrame(self.master, text="Processing Output")
         console_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5, anchor='s')
@@ -237,7 +247,7 @@ class TransformationApp:
         
     def create_file_transform_ui(self, parent):
         # File Selection Section
-        file_frame = ttk.LabelFrame(parent, text="Transformation Files")
+        file_frame = ttk.LabelFrame(parent, text="Transform Files")
         file_frame.pack(fill=tk.X, padx=10, pady=5)
         
         ttk.Label(file_frame, text="Input File:").grid(row=0, column=0, sticky=tk.W)
@@ -258,7 +268,103 @@ class TransformationApp:
         
         ttk.Button(control_frame, text="Transform File", 
                  command=self.run_file_transformation).pack(side=tk.LEFT, padx=5)
+
+    def create_batch_transform_ui(self, parent):
+        # Folder Selection Section
+        folder_frame = ttk.LabelFrame(parent, text="Transform Folders")
+        folder_frame.pack(fill=tk.X, padx=10, pady=5)
         
+        ttk.Label(folder_frame, text="Source Folder:").grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(folder_frame, textvariable=self.batch_source_folder, width=50).grid(row=0, column=1, padx=5)
+        ttk.Button(folder_frame, text="Browse", command=self.browse_batch_source_folder).grid(row=0, column=2)
+        
+        ttk.Label(folder_frame, text="Target Folder:").grid(row=1, column=0, sticky=tk.W)
+        ttk.Entry(folder_frame, textvariable=self.batch_target_folder, width=50).grid(row=1, column=1, padx=5)
+        ttk.Button(folder_frame, text="Browse", command=self.browse_batch_target_folder).grid(row=1, column=2)
+        
+        ttk.Label(folder_frame, text="Parameter File:").grid(row=2, column=0, sticky=tk.W)
+        ttk.Entry(folder_frame, textvariable=self.param_file, width=50).grid(row=2, column=1, padx=5)
+        ttk.Button(folder_frame, text="Browse", command=self.browse_param_file).grid(row=2, column=2)
+        
+        # Control Buttons
+        control_frame = ttk.Frame(parent)
+        control_frame.pack(pady=10)
+        
+        self.batch_transform_button = ttk.Button(control_frame, text="Transform Folder", 
+                                            command=self.run_batch_transformation)
+        self.batch_transform_button.pack(side=tk.LEFT, padx=5)
+        
+    # Add these methods to the TransformationApp class
+    def browse_batch_source_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.batch_source_folder.set(folder)
+
+    def browse_batch_target_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.batch_target_folder.set(folder)
+
+    def run_batch_transformation(self):
+        source_folder = self.batch_source_folder.get()
+        target_folder = self.batch_target_folder.get()
+        param_file = self.param_file.get()
+
+        if not source_folder or not target_folder or not param_file:
+            messagebox.showerror("Validation Error", "All fields are required")
+            return
+
+        # Disable the transform button to prevent multiple clicks
+        self.batch_transform_button.config(state=tk.DISABLED)
+
+        # Run the batch transformation in a separate thread
+        def batch_transformation_thread():
+            try:
+                # Read parameters
+                params = read_params(param_file)
+                print("Transformation parameters:")
+                print(params)
+
+                # Create output directory if needed
+                Path(target_folder).mkdir(parents=True, exist_ok=True)
+
+                # Get list of supported files in the source folder
+                supported_extensions = ['.csv', '.las', '.laz', '.dxf', '.tif', '.tiff']
+                files_to_process = [f for f in Path(source_folder).iterdir() if f.suffix.lower() in supported_extensions]
+
+                if not files_to_process:
+                    messagebox.showwarning("No Files", "No supported files found in the source folder")
+                    return
+
+                # Process each file sequentially
+                for input_file in files_to_process:
+                    output_file = Path(target_folder) / input_file.name
+                    ext = input_file.suffix.lower()
+
+                    try:
+                        if ext == '.csv':
+                            transform_csv_data(str(input_file), str(output_file), params)
+                        elif ext == '.dxf':
+                            transform_dxf(str(input_file), str(output_file), params)
+                        elif ext in ['.tif', '.tiff']:
+                            transform_geotiff(str(input_file), str(output_file), params)
+                        elif ext in ['.las', '.laz']:
+                            transform_pointcloud(str(input_file), str(output_file), params)
+
+                        print(f"Successfully transformed: {input_file.name}")
+                    except Exception as e:
+                        print(f"Error transforming {input_file.name}: {str(e)}")
+
+                messagebox.showinfo("Success", "Batch transformation completed successfully!")
+            except Exception as e:
+                messagebox.showerror("Batch Transformation Error", str(e))
+            finally:
+                # Re-enable the transform button after the process is done
+                self.batch_transform_button.config(state=tk.NORMAL)
+
+        # Start the batch transformation in a new thread
+        threading.Thread(target=batch_transformation_thread, daemon=True).start()
+
     def setup_output_redirect(self):
         sys.stdout = self
         sys.stderr = self
@@ -522,6 +628,7 @@ class TransformationApp:
         
         info_text = f"""
 === Coordinate Transformation Suite ===
+
 Started on: {current_time}
 Version: {__version__}
 {__copyright__}
